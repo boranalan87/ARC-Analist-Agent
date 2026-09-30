@@ -93,6 +93,7 @@ def health():
     }
 
     available_agents = []
+    agent_import_error = None
 
     try:
         agents, _ = load_agents()
@@ -105,8 +106,9 @@ def health():
             available_agents
         )
 
-    except Exception:
+    except Exception as exc:
         checks["agent_import"] = False
+        agent_import_error = str(exc)
 
     ready = all(checks.values())
 
@@ -122,6 +124,7 @@ def health():
         ),
         "checks": checks,
         "available_agents": available_agents,
+        "agent_import_error": agent_import_error,
     }
 
 
