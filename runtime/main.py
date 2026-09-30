@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 
 app = FastAPI(
     title="ARC Analist Agent Runtime",
-    version="0.3.0",
+    version="0.4.0",
 )
 
 
@@ -20,6 +20,18 @@ ARC_RUNTIME_TOKEN = os.getenv(
     "ARC_RUNTIME_TOKEN",
     "",
 ).strip()
+
+OPERATION_MODE = os.getenv(
+    "OPERATION_MODE",
+    "OFFLINE",
+).strip().upper()
+
+ENVIRONMENTS_DIR = os.getenv(
+    "ENVIRONMENTS_DIR",
+    "environment_files",
+).strip()
+
+ENVIRONMENTS_PATH = ROOT / ENVIRONMENTS_DIR
 
 
 if str(AGENT_ROOT) not in sys.path:
@@ -41,8 +53,9 @@ class RunRequest(BaseModel):
 def root():
     return {
         "service": "arc-analist-agent-runtime",
-        "version": "0.3.0",
+        "version": "0.4.0",
         "status": "ok",
+        "operation_mode": OPERATION_MODE,
     }
 
 
@@ -68,8 +81,13 @@ def health():
         "runtime_token": bool(
             ARC_RUNTIME_TOKEN
         ),
-        "arc_api_key": bool(
-            os.getenv("ARC_API_KEY")
+        "operation_mode": (
+            OPERATION_MODE
+            in {"OFFLINE", "NORMAL", "ONLINE"}
+        ),
+        "environments_dir": (
+            OPERATION_MODE != "OFFLINE"
+            or ENVIRONMENTS_PATH.is_dir()
         ),
         "agent_import": False,
     }
@@ -97,6 +115,10 @@ def health():
             "RUNTIME_READY"
             if ready
             else "RUNTIME_NOT_CONFIGURED"
+        ),
+        "operation_mode": OPERATION_MODE,
+        "environments_dir": str(
+            ENVIRONMENTS_PATH
         ),
         "checks": checks,
         "available_agents": available_agents,
@@ -186,17 +208,17 @@ def run(
 
     scheme = os.getenv(
         "SCHEME",
-        "https",
+        "http",
     ).strip()
 
     host = os.getenv(
         "HOST",
-        "three.arcprize.org",
+        "localhost",
     ).strip()
 
     port = os.getenv(
         "PORT",
-        "443",
+        "8001",
     ).strip()
 
     if not scheme or not host:
@@ -230,6 +252,7 @@ def run(
             tags=[
                 "arc-analist-agent",
                 "runtime-validation",
+                OPERATION_MODE.lower(),
             ],
         )
 
@@ -239,6 +262,7 @@ def run(
             return {
                 "status": "NOT_EXECUTED",
                 "runtime_state": "RUNTIME_READY",
+                "operation_mode": OPERATION_MODE,
                 "agent": agent_name,
                 "game": game_id,
                 "evidence": (
@@ -260,6 +284,7 @@ def run(
         return {
             "status": "COMPLETED",
             "runtime_state": "RUNTIME_READY",
+            "operation_mode": OPERATION_MODE,
             "agent": agent_name,
             "game": game_id,
             "scorecard": scorecard_data,
@@ -278,6 +303,7 @@ def run(
         return {
             "status": "NOT_EXECUTED",
             "runtime_state": "RUNTIME_ERROR",
+            "operation_mode": OPERATION_MODE,
             "agent": agent_name,
             "game": game_id,
             "error_type": type(exc).__name__,
