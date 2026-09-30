@@ -1,2 +1,13 @@
 streamlit>=1.38,<2
-numpy>=1.26,<3
+fastapi>=0.115,<1
+pydantic>=2.11.7,<3
+numpy>=2.3.2,<3
+arc-agi>=0.9.1
+python-dotenv>=1.0,<2
+requests>=2.32.4,<3
+pillow>=11.2.1
+openai==1.72.0
+langchain[openai]>=0.3.27
+langgraph>=0.6.3
+langgraph-checkpoint-sqlite>=2.0.11
+smolagents>=1.20.0
