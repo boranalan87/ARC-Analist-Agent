@@ -1,38 +1,52 @@
 import os
 import sys
 from pathlib import Path
+from typing import Optional
 
 from fastapi import FastAPI, Header, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 app = FastAPI(
     title="ARC Analist Agent Runtime",
-    version="0.2.0",
+    version="0.3.0",
 )
+
 
 ROOT = Path(__file__).resolve().parents[1]
 AGENT_ROOT = ROOT / "ARC-AGI-3-Agents"
-TOKEN = os.getenv("ARC_RUNTIME_TOKEN", "")
+
+ARC_RUNTIME_TOKEN = os.getenv(
+    "ARC_RUNTIME_TOKEN",
+    "",
+).strip()
+
 
 if str(AGENT_ROOT) not in sys.path:
     sys.path.insert(0, str(AGENT_ROOT))
 
 
 class RunRequest(BaseModel):
-    agent: str = "random"
-    game: str
+    agent: str = Field(
+        default="random",
+        min_length=1,
+    )
+    game: str = Field(
+        ...,
+        min_length=1,
+    )
 
 
 @app.get("/")
 def root():
     return {
         "service": "arc-analist-agent-runtime",
+        "version": "0.3.0",
         "status": "ok",
     }
 
 
-def _load_agents():
+def load_agents():
     try:
         from agents import AVAILABLE_AGENTS, Swarm
 
@@ -51,13 +65,27 @@ def health():
             (AGENT_ROOT / "main.py").exists()
             and (AGENT_ROOT / "agents").is_dir()
         ),
-        "arc_api_key": bool(os.getenv("ARC_API_KEY")),
-        "runtime_token": bool(TOKEN),
+        "runtime_token": bool(
+            ARC_RUNTIME_TOKEN
+        ),
+        "arc_api_key": bool(
+            os.getenv("ARC_API_KEY")
+        ),
+        "agent_import": False,
     }
 
+    available_agents = []
+
     try:
-        available_agents, _ = _load_agents()
-        checks["agent_import"] = bool(available_agents)
+        agents, _ = load_agents()
+
+        available_agents = sorted(
+            agents.keys()
+        )
+
+        checks["agent_import"] = bool(
+            available_agents
+        )
 
     except Exception:
         checks["agent_import"] = False
@@ -71,17 +99,27 @@ def health():
             else "RUNTIME_NOT_CONFIGURED"
         ),
         "checks": checks,
+        "available_agents": available_agents,
     }
 
 
-def authorize(authorization: str | None):
-    if not TOKEN:
+def authorize(
+    authorization: Optional[str],
+):
+    if not ARC_RUNTIME_TOKEN:
         raise HTTPException(
             status_code=503,
-            detail="ARC_RUNTIME_TOKEN is not configured",
+            detail=(
+                "ARC_RUNTIME_TOKEN "
+                "is not configured"
+            ),
         )
 
-    if authorization != f"Bearer {TOKEN}":
+    expected_token = (
+        f"Bearer {ARC_RUNTIME_TOKEN}"
+    )
+
+    if authorization != expected_token:
         raise HTTPException(
             status_code=401,
             detail="Unauthorized",
@@ -91,63 +129,104 @@ def authorize(authorization: str | None):
 @app.post("/run")
 def run(
     req: RunRequest,
-    authorization: str | None = Header(default=None),
+    authorization: Optional[str] = Header(
+        default=None
+    ),
 ):
     authorize(authorization)
 
     health_state = health()
 
-    if health_state["runtime_state"] != "RUNTIME_READY":
+    if (
+        health_state["runtime_state"]
+        != "RUNTIME_READY"
+    ):
         return {
             "status": "NOT_EXECUTED",
             **health_state,
             "evidence": (
-                "Runtime prerequisites are not configured."
+                "Runtime prerequisites "
+                "are not configured."
             ),
         }
 
-    available_agents, Swarm = _load_agents()
+    available_agents, Swarm = load_agents()
 
-    if req.agent not in available_agents:
+    agent_name = req.agent.strip()
+    game_id = req.game.strip()
+
+    if agent_name not in available_agents:
         raise HTTPException(
             status_code=400,
             detail={
                 "message": "Unknown ARC agent",
-                "agent": req.agent,
+                "agent": agent_name,
                 "available_agents": sorted(
                     available_agents.keys()
                 ),
             },
         )
 
-    game = req.game.strip()
-
-    if not game or "," in game:
+    if not game_id:
         raise HTTPException(
             status_code=400,
             detail=(
-                "Exactly one ARC game_id is required "
-                "for each validation run."
+                "A game_id is required."
             ),
         )
 
+    if "," in game_id:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Exactly one ARC game_id "
+                "is required for each run."
+            ),
+        )
+
+    scheme = os.getenv(
+        "SCHEME",
+        "https",
+    ).strip()
+
+    host = os.getenv(
+        "HOST",
+        "three.arcprize.org",
+    ).strip()
+
+    port = os.getenv(
+        "PORT",
+        "443",
+    ).strip()
+
+    if not scheme or not host:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "ARC endpoint configuration "
+                "is incomplete."
+            ),
+        )
+
+    if (
+        (scheme == "https" and port == "443")
+        or
+        (scheme == "http" and port == "80")
+        or
+        not port
+    ):
+        root_url = f"{scheme}://{host}"
+
+    else:
+        root_url = (
+            f"{scheme}://{host}:{port}"
+        )
+
     try:
-        scheme = os.getenv("SCHEME", "https")
-        host = os.getenv("HOST", "three.arcprize.org")
-        port = os.getenv("PORT", "443")
-
-        if (
-            (scheme == "https" and port == "443")
-            or (scheme == "http" and port == "80")
-        ):
-            root_url = f"{scheme}://{host}"
-        else:
-            root_url = f"{scheme}://{host}:{port}"
-
         swarm = Swarm(
-            req.agent,
+            agent_name,
             root_url,
-            [game],
+            [game_id],
             tags=[
                 "arc-analist-agent",
                 "runtime-validation",
@@ -160,11 +239,13 @@ def run(
             return {
                 "status": "NOT_EXECUTED",
                 "runtime_state": "RUNTIME_READY",
-                "agent": req.agent,
-                "game": game,
+                "agent": agent_name,
+                "game": game_id,
                 "evidence": (
-                    "ARC runner returned no scorecard; "
-                    "no metrics were persisted."
+                    "ARC runner returned "
+                    "no scorecard. "
+                    "No execution metrics "
+                    "were persisted."
                 ),
             }
 
@@ -172,18 +253,21 @@ def run(
             mode="json"
         )
 
-        game_result = scorecard.get(game)
+        game_result = scorecard.get(
+            game_id
+        )
 
         return {
             "status": "COMPLETED",
             "runtime_state": "RUNTIME_READY",
-            "agent": req.agent,
-            "game": game,
+            "agent": agent_name,
+            "game": game_id,
             "scorecard": scorecard_data,
             "game_result": game_result,
             "evidence": (
-                "Result returned directly by the "
-                "ARC Swarm/Arcade scorecard."
+                "Result returned directly "
+                "by the ARC Swarm/Arcade "
+                "scorecard."
             ),
         }
 
@@ -194,8 +278,8 @@ def run(
         return {
             "status": "NOT_EXECUTED",
             "runtime_state": "RUNTIME_ERROR",
-            "agent": req.agent,
-            "game": game,
+            "agent": agent_name,
+            "game": game_id,
             "error_type": type(exc).__name__,
             "evidence": str(exc),
         }
