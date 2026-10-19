@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 from .agent import Agent, Playback
 from .recorder import Recorder
 from .swarm import Swarm
+from .templates.feedback_explorer import FeedbackExplorer
 from .templates.langgraph_functional_agent import LangGraphFunc, LangGraphTextOnly
 from .templates.langgraph_random_agent import LangGraphRandom
 from .templates.langgraph_thinking import LangGraphThinking
@@ -22,16 +23,20 @@ AVAILABLE_AGENTS: dict[str, Type[Agent]] = {
     if cls.__name__ != "Playback"
 }
 
-# add all the recording files as valid agent names
+# Add all recording files as valid agent names
 for rec in Recorder.list():
     AVAILABLE_AGENTS[rec] = Playback
 
-# update the agent dictionary to include subclasses of LLM class
+# Register reasoning agent
 AVAILABLE_AGENTS["reasoningagent"] = ReasoningAgent
+
+# Register FeedbackExplorer explicitly
+AVAILABLE_AGENTS["feedbackexplorer"] = FeedbackExplorer
 
 __all__ = [
     "Swarm",
     "Random",
+    "FeedbackExplorer",
     "LangGraphFunc",
     "LangGraphTextOnly",
     "LangGraphThinking",
