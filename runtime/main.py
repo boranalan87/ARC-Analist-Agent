@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 
 app = FastAPI(
     title="ARC Analist Agent Runtime",
-    version="0.4.0",
+    version="0.5.0",
 )
 
 
@@ -43,6 +43,7 @@ class RunRequest(BaseModel):
         default="random",
         min_length=1,
     )
+
     game: str = Field(
         ...,
         min_length=1,
@@ -53,7 +54,7 @@ class RunRequest(BaseModel):
 def root():
     return {
         "service": "arc-analist-agent-runtime",
-        "version": "0.4.0",
+        "version": "0.5.0",
         "status": "ok",
         "operation_mode": OPERATION_MODE,
     }
@@ -149,6 +150,37 @@ def authorize(
             status_code=401,
             detail="Unauthorized",
         )
+
+
+def collect_diagnostics(
+    swarm,
+    agent_name: str,
+    game_id: str,
+):
+    """Collect real FeedbackExplorer action measurements.
+
+    Returns None for other agents or when diagnostics
+    have not been initialized.
+    """
+    if agent_name != "feedbackexplorer":
+        return None
+
+    for game_agent in swarm.agents:
+        if game_agent.game_id != game_id:
+            continue
+
+        tracker = getattr(
+            game_agent,
+            "diagnostics",
+            None,
+        )
+
+        if tracker is not None:
+            return tracker.summary()
+
+        return None
+
+    return None
 
 
 @app.post("/run")
@@ -284,6 +316,15 @@ def run(
             game_id
         )
 
+        # Collect diagnostics from the actual
+        # FeedbackExplorer execution after the
+        # swarm has finished running.
+        diagnostics = collect_diagnostics(
+            swarm,
+            agent_name,
+            game_id,
+        )
+
         return {
             "status": "COMPLETED",
             "runtime_state": "RUNTIME_READY",
@@ -292,6 +333,7 @@ def run(
             "game": game_id,
             "scorecard": scorecard_data,
             "game_result": game_result,
+            "diagnostics": diagnostics,
             "evidence": (
                 "Result returned directly "
                 "by the ARC Swarm/Arcade "

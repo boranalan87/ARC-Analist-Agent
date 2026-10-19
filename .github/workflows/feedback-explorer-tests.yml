@@ -4,6 +4,10 @@ on:
   push:
     branches:
       - feat/feedback-explorer-fix
+      - feat/feedback-diagnostics-v1
+  pull_request:
+    branches:
+      - main
   workflow_dispatch:
 
 jobs:
@@ -19,6 +23,6 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Run FeedbackExplorer unit tests
+      - name: Run FeedbackExplorer policy and diagnostics tests
         working-directory: ARC-AGI-3-Agents
-        run: python -m unittest discover -s tests -p "test_feedback_policy.py" -v
+        run: python -m unittest discover -s tests -p "test_feedback_*.py" -v
