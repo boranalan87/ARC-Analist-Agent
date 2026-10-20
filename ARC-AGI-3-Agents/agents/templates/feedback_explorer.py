@@ -6,7 +6,7 @@ from arcengine import FrameData, GameAction, GameState
 
 from ..agent import Agent
 from .feedback_policy import FeedbackPolicy, observation_key
-from .feedback_diagnostics import FeedbackDiagnostics
+from .feedback_diagnostics_v2 import FeedbackDiagnosticsV2
 
 
 class FeedbackExplorer(Agent):
@@ -17,7 +17,7 @@ class FeedbackExplorer(Agent):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self.policy = FeedbackPolicy()
-        self.diagnostics = FeedbackDiagnostics()
+        self.diagnostics = FeedbackDiagnosticsV2(policy=self.policy)
 
     def is_done(
         self,
@@ -99,6 +99,7 @@ class FeedbackExplorer(Agent):
                 after_frame=after.frame,
                 before_levels=before.levels_completed,
                 after_levels=after.levels_completed,
+                after_state=after.state.name,
             )
 
         return after

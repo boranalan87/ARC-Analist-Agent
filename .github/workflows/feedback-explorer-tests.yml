@@ -5,13 +5,17 @@ on:
     branches:
       - feat/feedback-explorer-fix
       - feat/feedback-diagnostics-v1
+      - feat/feedback-explorer-v2
+
   pull_request:
     branches:
       - main
+
   workflow_dispatch:
 
 jobs:
   test:
+    name: FeedbackExplorer Automated Tests
     runs-on: ubuntu-latest
 
     steps:
@@ -23,6 +27,10 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Run FeedbackExplorer policy and diagnostics tests
+      - name: Run FeedbackExplorer V1 and V2 tests
         working-directory: ARC-AGI-3-Agents
-        run: python -m unittest discover -s tests -p "test_feedback_*.py" -v
+        run: |
+          python -m unittest discover \
+            -s tests \
+            -p "test_feedback_*.py" \
+            -v
