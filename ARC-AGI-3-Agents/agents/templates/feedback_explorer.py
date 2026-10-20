@@ -1,35 +1,3 @@
-"""Keyboard frame-aware ARC-AGI-3 exploration agent."""
-
-from typing import Any
-
-from arcengine import FrameData, GameAction, GameState
-
-from ..agent import Agent
-from .feedback_policy import FeedbackPolicy, observation_key
-from .feedback_diagnostics import FeedbackDiagnostics
-
-
-class FeedbackExplorer(Agent):
-    """Explore keyboard games and record action outcomes."""
-
-    MAX_ACTIONS = 80
-
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        super().__init__(*args, **kwargs)
-        self.policy = FeedbackPolicy()
-        self.diagnostics = FeedbackDiagnostics()
-
-    def is_done(
-        self,
-        frames: list[FrameData],
-        latest_frame: FrameData,
-    ) -> bool:
-        return latest_frame.state is GameState.WIN
-
-    def choose_action(
-        self,
-        frames: list[FrameData],
-        latest_frame: FrameData,
     ) -> GameAction:
 
         state = latest_frame.state
@@ -99,6 +67,7 @@ class FeedbackExplorer(Agent):
                 after_frame=after.frame,
                 before_levels=before.levels_completed,
                 after_levels=after.levels_completed,
+                after_state=after.state.name,
             )
 
         return after
