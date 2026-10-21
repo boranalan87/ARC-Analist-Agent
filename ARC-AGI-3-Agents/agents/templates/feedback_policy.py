@@ -1,10 +1,10 @@
 """Dependency-free feedback policy for keyboard ARC-AGI-3 games.
 
-FeedbackExplorer V5:
-- Preserve V3 balanced exploration.
-- Preserve rewards based on observed outcomes.
-- Optionally avoid immediate opposite-direction actions.
-- Keep the new behavior disabled by default.
+FeedbackExplorer V6:
+- Preserve V3 balanced exploration and reward learning.
+- Preserve V5 optional immediate reverse movement prevention.
+- Optionally ignore the LS20 step-counter HUD in state fingerprints.
+- Keep the new LS20 state behavior disabled by default.
 
 This is an exploration policy, not a complete game solver.
 """
@@ -37,10 +37,34 @@ def observation_key(
     frame: Sequence[Any],
     levels_completed: int,
     state: str,
+    *,
+    mask_ls20_step_counter: bool = False,
 ) -> str:
-    """Generate a stable fingerprint of an observation."""
+    """Generate a stable fingerprint of the current observation.
+
+    V6 optionally ignores the bottom-left LS20 step-counter display.
+    The option is disabled by default, preserving existing behavior.
+    """
 
     final_grid = frame[-1] if frame else []
+
+    if mask_ls20_step_counter:
+        try:
+            if (
+                len(final_grid) == 64
+                and all(len(row) == 64 for row in final_grid)
+            ):
+                final_grid = tuple(
+                    tuple(
+                        -1 if (61 <= y <= 62 and 13 <= x < 56)
+                        else int(pixel)
+                        for x, pixel in enumerate(row)
+                    )
+                    for y, row in enumerate(final_grid)
+                )
+        except (TypeError, ValueError, OverflowError):
+            # Nonstandard frames retain their original fingerprint.
+            pass
 
     raw = repr(
         (state, levels_completed, final_grid)
@@ -56,8 +80,8 @@ class FeedbackPolicy:
     """Choose exploration actions using observed feedback.
 
     V3: Balanced exploration across visited screens.
-
     V5: Optional prevention of immediate opposite actions.
+    V6: State fingerprinting can ignore LS20's step-counter HUD.
 
     Level completion and scores are never invented.
     """
@@ -70,204 +94,3 @@ class FeedbackPolicy:
 
         if not actions or len(set(actions)) != len(actions):
             raise ValueError(
-                "Provide distinct nonempty actions"
-            )
-
-        self.actions = tuple(actions)
-
-        self.avoid_immediate_reverse = (
-            avoid_immediate_reverse
-        )
-
-        self._last_action: str | None = None
-
-        self.visits: Counter[str] = Counter()
-
-        self.attempts: Counter[
-            tuple[str, str]
-        ] = Counter()
-
-        self.reward_sum: dict[
-            tuple[str, str], float
-        ] = defaultdict(float)
-
-        self.next_screen: dict[
-            tuple[str, str], str
-        ] = {}
-
-        self._pending: (
-            tuple[str, str, int] | None
-        ) = None
-
-    def clear_pending(self) -> None:
-        """Clear pending state when the game resets."""
-
-        self._pending = None
-        self._last_action = None
-
-    def observe(
-        self,
-        key: str,
-        levels_completed: int,
-        state: str,
-    ) -> None:
-        """Evaluate the observed outcome of the last action."""
-
-        first_visit = self.visits[key] == 0
-
-        if self._pending is not None:
-
-            old_key, action, old_levels = self._pending
-
-            pair = (old_key, action)
-
-            progressed = (
-                levels_completed > old_levels
-            )
-
-            if state == "WIN":
-                reward = 100.0
-
-            elif progressed:
-                reward = 20.0
-
-            elif state == "GAME_OVER":
-                reward = -3.0
-
-            elif key == old_key:
-                reward = -2.0
-
-            elif first_visit:
-                reward = 3.0
-
-            else:
-                reward = 0.5
-
-            self.reward_sum[pair] += reward
-            self.next_screen[pair] = key
-
-            self._pending = None
-
-            # A new level starts a new movement context.
-            if progressed or state in ("WIN", "GAME_OVER"):
-                self._last_action = None
-
-        self.visits[key] += 1
-
-    def _candidate_actions(self) -> list[str]:
-        """Return actions allowed by the optional V5 rule."""
-
-        candidates = list(self.actions)
-
-        if not self.avoid_immediate_reverse:
-            return candidates
-
-        opposite = OPPOSITE_ACTIONS.get(
-            self._last_action
-        )
-
-        if opposite is None:
-            return candidates
-
-        filtered = [
-            action
-            for action in candidates
-            if action != opposite
-        ]
-
-        # Always keep at least one valid action available.
-        return filtered if filtered else candidates
-
-    def choose(
-        self,
-        key: str,
-        levels_completed: int,
-    ) -> str:
-        """Select an action using balanced exploration.
-
-        V5 optionally excludes the immediate reverse direction.
-
-        Among untried actions, choose the least-used action.
-
-        Once candidate actions have been explored, use their
-        observed rewards, novelty and exploration bonuses.
-        """
-
-        candidates = self._candidate_actions()
-
-        unseen = [
-            action
-            for action in candidates
-            if self.attempts[(key, action)] == 0
-        ]
-
-        if unseen:
-
-            total_usage = Counter()
-
-            for (_, action), count in self.attempts.items():
-                total_usage[action] += count
-
-            action = min(
-                unseen,
-                key=lambda candidate: (
-                    total_usage[candidate],
-                    self.actions.index(candidate),
-                ),
-            )
-
-        else:
-
-            def value(action_name: str) -> float:
-
-                pair = (key, action_name)
-
-                count = self.attempts[pair]
-
-                mean_reward = (
-                    self.reward_sum[pair] / count
-                )
-
-                destination = self.next_screen.get(pair)
-
-                if destination:
-                    novelty = (
-                        1.5
-                        / sqrt(
-                            1 + self.visits[destination]
-                        )
-                    )
-                else:
-                    novelty = 0.0
-
-                exploration_bonus = (
-                    0.5 / sqrt(count)
-                )
-
-                repeat_penalty = (
-                    0.1 * count
-                )
-
-                return (
-                    mean_reward
-                    + novelty
-                    + exploration_bonus
-                    - repeat_penalty
-                )
-
-            action = max(
-                candidates,
-                key=value,
-            )
-
-        self.attempts[(key, action)] += 1
-
-        self._pending = (
-            key,
-            action,
-            levels_completed,
-        )
-
-        self._last_action = action
-
-        return action
