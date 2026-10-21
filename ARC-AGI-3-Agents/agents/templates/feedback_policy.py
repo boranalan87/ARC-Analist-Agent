@@ -1,3 +1,163 @@
+"""Dependency-free feedback policy for keyboard ARC-AGI-3 games.
+
+FeedbackExplorer V6:
+- Preserve V3 balanced exploration and reward learning.
+- Preserve V5 optional immediate reverse movement prevention.
+- Optionally ignore the LS20 step-counter HUD in state fingerprints.
+- Keep the new LS20 state behavior disabled by default.
+
+This is an exploration policy, not a complete game solver.
+"""
+
+from __future__ import annotations
+
+from collections import Counter, defaultdict
+from hashlib import blake2b
+from math import sqrt
+from typing import Any, Sequence
+
+
+KEYBOARD_ACTIONS = (
+    "ACTION1",  # up
+    "ACTION2",  # down
+    "ACTION3",  # left
+    "ACTION4",  # right
+    "ACTION5",  # game-dependent key
+)
+
+OPPOSITE_ACTIONS = {
+    "ACTION1": "ACTION2",
+    "ACTION2": "ACTION1",
+    "ACTION3": "ACTION4",
+    "ACTION4": "ACTION3",
+}
+
+
+def observation_key(
+    frame: Sequence[Any],
+    levels_completed: int,
+    state: str,
+    *,
+    mask_ls20_step_counter: bool = False,
+) -> str:
+    """Generate a stable fingerprint of the current observation.
+
+    V6 optionally ignores the bottom-left LS20 step-counter display.
+    The option is disabled by default, preserving existing behavior.
+    """
+
+    final_grid = frame[-1] if frame else []
+
+    if mask_ls20_step_counter:
+        try:
+            if (
+                len(final_grid) == 64
+                and all(len(row) == 64 for row in final_grid)
+            ):
+                final_grid = tuple(
+                    tuple(
+                        -1 if (61 <= y <= 62 and 13 <= x < 56)
+                        else int(pixel)
+                        for x, pixel in enumerate(row)
+                    )
+                    for y, row in enumerate(final_grid)
+                )
+        except (TypeError, ValueError, OverflowError):
+            # Nonstandard frames retain their original fingerprint.
+            pass
+
+    raw = repr(
+        (state, levels_completed, final_grid)
+    ).encode("utf-8")
+
+    return blake2b(
+        raw,
+        digest_size=16,
+    ).hexdigest()
+
+
+class FeedbackPolicy:
+    """Choose exploration actions using observed feedback.
+
+    V3: Balanced exploration across visited screens.
+    V5: Optional prevention of immediate opposite actions.
+    V6: State fingerprinting can ignore LS20's step-counter HUD.
+
+    Level completion and scores are never invented.
+    """
+
+    def __init__(
+        self,
+        actions: Sequence[str] = KEYBOARD_ACTIONS,
+        avoid_immediate_reverse: bool = False,
+    ) -> None:
+
+        if not actions or len(set(actions)) != len(actions):
+            raise ValueError(
+                "Provide distinct nonempty actions"
+            )
+
+        self.actions = tuple(actions)
+
+        self.avoid_immediate_reverse = (
+            avoid_immediate_reverse
+        )
+
+        self._last_action: str | None = None
+
+        self.visits: Counter[str] = Counter()
+
+        self.attempts: Counter[
+            tuple[str, str]
+        ] = Counter()
+
+        self.reward_sum: dict[
+            tuple[str, str], float
+        ] = defaultdict(float)
+
+        self.next_screen: dict[
+            tuple[str, str], str
+        ] = {}
+
+        self._pending: (
+            tuple[str, str, int] | None
+        ) = None
+
+    def clear_pending(self) -> None:
+        """Clear pending state when the game resets."""
+
+        self._pending = None
+        self._last_action = None
+
+    def observe(
+        self,
+        key: str,
+        levels_completed: int,
+        state: str,
+    ) -> None:
+        """Evaluate the observed outcome of the last action."""
+
+        first_visit = self.visits[key] == 0
+
+        if self._pending is not None:
+
+            old_key, action, old_levels = self._pending
+
+            pair = (old_key, action)
+
+            progressed = (
+                levels_completed > old_levels
+            )
+
+            if state == "WIN":
+                reward = 100.0
+
+            elif progressed:
+                reward = 20.0
+
+            elif state == "GAME_OVER":
+                reward = -3.0
+
             elif key == old_key:
                 reward = -2.0
 
@@ -126,3 +286,10 @@
 
         self._pending = (
             key,
+            action,
+            levels_completed,
+        )
+
+        self._last_action = action
+
+        return action
