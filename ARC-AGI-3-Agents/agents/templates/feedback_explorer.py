@@ -1,8 +1,13 @@
 """Keyboard frame-aware ARC-AGI-3 exploration agent.
 
-FeedbackExplorer V4:
-Use the supported action set for LS20 while preserving
-the default exploration policy for other games.
+FeedbackExplorer V5:
+- Preserve V3 balanced action exploration.
+- Preserve V4 LS20 action compatibility.
+- Avoid immediate reverse movements in LS20.
+- Preserve default behavior for other games.
+- Keep real diagnostics and level measurements.
+
+This agent explores the game but does not guarantee a solution.
 """
 
 from typing import Any
@@ -15,15 +20,19 @@ from .feedback_diagnostics_v2 import FeedbackDiagnosticsV2
 
 
 class FeedbackExplorer(Agent):
-    """Explore keyboard games and record action outcomes."""
+    """Explore keyboard games and record observed outcomes."""
 
     MAX_ACTIONS = 80
 
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
         super().__init__(*args, **kwargs)
 
-        # V4: LS20 supports only ACTION1 through ACTION4.
-        # Preserve the existing default policy for other games.
+        # V4: LS20 supports ACTION1 through ACTION4 only.
+        # V5: Avoid immediate reverse movements in LS20.
         if self.game_id == "ls20-9607627b":
             self.policy = FeedbackPolicy(
                 actions=(
@@ -33,9 +42,16 @@ class FeedbackExplorer(Agent):
                     "ACTION4",
                 )
             )
+
+            # Enable V5 behavior while preserving
+            # compatibility with existing V4 test stubs.
+            self.policy.avoid_immediate_reverse = True
+
         else:
+            # Preserve the default policy for other games.
             self.policy = FeedbackPolicy()
 
+        # Diagnostics must use the active policy instance.
         self.diagnostics = FeedbackDiagnosticsV2(
             policy=self.policy
         )
@@ -45,6 +61,8 @@ class FeedbackExplorer(Agent):
         frames: list[FrameData],
         latest_frame: FrameData,
     ) -> bool:
+        """Stop only when the game reports WIN."""
+
         return latest_frame.state is GameState.WIN
 
     def choose_action(
@@ -52,6 +70,7 @@ class FeedbackExplorer(Agent):
         frames: list[FrameData],
         latest_frame: FrameData,
     ) -> GameAction:
+        """Choose an action using the active feedback policy."""
 
         state = latest_frame.state
 
@@ -70,24 +89,31 @@ class FeedbackExplorer(Agent):
                     state.name,
                 )
 
+            # Clear pending feedback and reverse-movement memory.
             self.policy.clear_pending()
 
             action = GameAction.RESET
-            action.reasoning = "Start or restart game"
+            action.reasoning = (
+                "FeedbackExplorer V5: start or restart game"
+            )
+
             return action
 
+        # Identify the current observed game state.
         key = observation_key(
             latest_frame.frame,
             latest_frame.levels_completed,
             state.name,
         )
 
+        # Evaluate the previous action using real feedback.
         self.policy.observe(
             key,
             latest_frame.levels_completed,
             state.name,
         )
 
+        # Select an action from the configured action set.
         action_name = self.policy.choose(
             key,
             latest_frame.levels_completed,
@@ -95,10 +121,13 @@ class FeedbackExplorer(Agent):
 
         action = GameAction.from_name(action_name)
 
+        # Record meaningful information about the decision.
         action.reasoning = (
-            f"FeedbackExplorer V4: {action_name}; "
+            f"FeedbackExplorer V5: {action_name}; "
             f"state_visits={self.policy.visits[key]}; "
-            f"trials={self.policy.attempts[(key, action_name)]}"
+            f"trials={self.policy.attempts[(key, action_name)]}; "
+            f"avoid_reverse="
+            f"{self.policy.avoid_immediate_reverse}"
         )
 
         return action
@@ -107,7 +136,7 @@ class FeedbackExplorer(Agent):
         self,
         action: GameAction,
     ) -> FrameData | None:
-        """Execute action and collect its observed outcome."""
+        """Execute an action and record its real outcome."""
 
         before = self.frames[-1]
 

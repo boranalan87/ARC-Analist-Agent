@@ -1,13 +1,12 @@
-"""Dependency-free feedback policy for the keyboard ARC-AGI-3 baseline.
+"""Dependency-free feedback policy for keyboard ARC-AGI-3 games.
 
-FeedbackExplorer V3 — balanced action exploration.
+FeedbackExplorer V5:
+- Preserve V3 balanced exploration.
+- Preserve rewards based on observed outcomes.
+- Optionally avoid immediate opposite-direction actions.
+- Keep the new behavior disabled by default.
 
-This is an exploration policy, not a general ARC game solver.
-It uses observed frame changes and level progress to evaluate actions.
-
-Untried actions are selected according to their overall usage across
-the current run, avoiding an excessive preference for ACTION1 when
-the agent visits previously unseen screens.
+This is an exploration policy, not a complete game solver.
 """
 
 from __future__ import annotations
@@ -26,17 +25,21 @@ KEYBOARD_ACTIONS = (
     "ACTION5",  # game-dependent key
 )
 
+OPPOSITE_ACTIONS = {
+    "ACTION1": "ACTION2",
+    "ACTION2": "ACTION1",
+    "ACTION3": "ACTION4",
+    "ACTION4": "ACTION3",
+}
+
 
 def observation_key(
     frame: Sequence[Any],
     levels_completed: int,
     state: str,
 ) -> str:
-    """Generate a stable fingerprint of the current observation.
+    """Generate a stable fingerprint of an observation."""
 
-    FrameData.frame may contain multiple grids representing
-    an animation. The last grid represents the latest view.
-    """
     final_grid = frame[-1] if frame else []
 
     raw = repr(
@@ -50,19 +53,19 @@ def observation_key(
 
 
 class FeedbackPolicy:
-    """Track observed actions and select exploration candidates.
+    """Choose exploration actions using observed feedback.
 
-    V3 balances untried actions across the current run.
+    V3: Balanced exploration across visited screens.
 
-    Known actions are evaluated using observed rewards,
-    destination novelty, exploration bonuses and repeat penalties.
+    V5: Optional prevention of immediate opposite actions.
 
-    This policy does not invent level completions or scores.
+    Level completion and scores are never invented.
     """
 
     def __init__(
         self,
         actions: Sequence[str] = KEYBOARD_ACTIONS,
+        avoid_immediate_reverse: bool = False,
     ) -> None:
 
         if not actions or len(set(actions)) != len(actions):
@@ -71,6 +74,12 @@ class FeedbackPolicy:
             )
 
         self.actions = tuple(actions)
+
+        self.avoid_immediate_reverse = (
+            avoid_immediate_reverse
+        )
+
+        self._last_action: str | None = None
 
         self.visits: Counter[str] = Counter()
 
@@ -91,8 +100,10 @@ class FeedbackPolicy:
         ) = None
 
     def clear_pending(self) -> None:
-        """Clear a pending action when the game resets."""
+        """Clear pending state when the game resets."""
+
         self._pending = None
+        self._last_action = None
 
     def observe(
         self,
@@ -100,7 +111,7 @@ class FeedbackPolicy:
         levels_completed: int,
         state: str,
     ) -> None:
-        """Evaluate the outcome of the previous action."""
+        """Evaluate the observed outcome of the last action."""
 
         first_visit = self.visits[key] == 0
 
@@ -137,7 +148,35 @@ class FeedbackPolicy:
 
             self._pending = None
 
+            # A new level starts a new movement context.
+            if progressed or state in ("WIN", "GAME_OVER"):
+                self._last_action = None
+
         self.visits[key] += 1
+
+    def _candidate_actions(self) -> list[str]:
+        """Return actions allowed by the optional V5 rule."""
+
+        candidates = list(self.actions)
+
+        if not self.avoid_immediate_reverse:
+            return candidates
+
+        opposite = OPPOSITE_ACTIONS.get(
+            self._last_action
+        )
+
+        if opposite is None:
+            return candidates
+
+        filtered = [
+            action
+            for action in candidates
+            if action != opposite
+        ]
+
+        # Always keep at least one valid action available.
+        return filtered if filtered else candidates
 
     def choose(
         self,
@@ -146,25 +185,23 @@ class FeedbackPolicy:
     ) -> str:
         """Select an action using balanced exploration.
 
-        First try actions not yet used on the current screen.
+        V5 optionally excludes the immediate reverse direction.
 
-        Among those actions, prefer the action used least
-        frequently across the entire current run.
+        Among untried actions, choose the least-used action.
 
-        Once every action has been tried on the current screen,
-        use observed rewards and exploration bonuses.
+        Once candidate actions have been explored, use their
+        observed rewards, novelty and exploration bonuses.
         """
+
+        candidates = self._candidate_actions()
 
         unseen = [
             action
-            for action in self.actions
+            for action in candidates
             if self.attempts[(key, action)] == 0
         ]
 
         if unseen:
-
-            # V3: Balance action usage across visited screens.
-            # Deterministic tie-breaking preserves repeatability.
 
             total_usage = Counter()
 
@@ -219,7 +256,7 @@ class FeedbackPolicy:
                 )
 
             action = max(
-                self.actions,
+                candidates,
                 key=value,
             )
 
@@ -230,5 +267,7 @@ class FeedbackPolicy:
             action,
             levels_completed,
         )
+
+        self._last_action = action
 
         return action
