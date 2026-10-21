@@ -1,4 +1,9 @@
-"""Keyboard frame-aware ARC-AGI-3 exploration agent."""
+"""Keyboard frame-aware ARC-AGI-3 exploration agent.
+
+FeedbackExplorer V4:
+Use the supported action set for LS20 while preserving
+the default exploration policy for other games.
+"""
 
 from typing import Any
 
@@ -16,8 +21,24 @@ class FeedbackExplorer(Agent):
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
-        self.policy = FeedbackPolicy()
-        self.diagnostics = FeedbackDiagnosticsV2(policy=self.policy)
+
+        # V4: LS20 supports only ACTION1 through ACTION4.
+        # Preserve the existing default policy for other games.
+        if self.game_id == "ls20-9607627b":
+            self.policy = FeedbackPolicy(
+                actions=(
+                    "ACTION1",
+                    "ACTION2",
+                    "ACTION3",
+                    "ACTION4",
+                )
+            )
+        else:
+            self.policy = FeedbackPolicy()
+
+        self.diagnostics = FeedbackDiagnosticsV2(
+            policy=self.policy
+        )
 
     def is_done(
         self,
@@ -75,7 +96,7 @@ class FeedbackExplorer(Agent):
         action = GameAction.from_name(action_name)
 
         action.reasoning = (
-            f"FeedbackExplorer: {action_name}; "
+            f"FeedbackExplorer V4: {action_name}; "
             f"state_visits={self.policy.visits[key]}; "
             f"trials={self.policy.attempts[(key, action_name)]}"
         )
