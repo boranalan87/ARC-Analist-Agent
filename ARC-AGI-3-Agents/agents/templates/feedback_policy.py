@@ -1,96 +1,128 @@
-"""Dependency-free feedback policy for keyboard ARC-AGI-3 games.
+            elif key == old_key:
+                reward = -2.0
 
-FeedbackExplorer V6:
-- Preserve V3 balanced exploration and reward learning.
-- Preserve V5 optional immediate reverse movement prevention.
-- Optionally ignore the LS20 step-counter HUD in state fingerprints.
-- Keep the new LS20 state behavior disabled by default.
+            elif first_visit:
+                reward = 3.0
 
-This is an exploration policy, not a complete game solver.
-"""
+            else:
+                reward = 0.5
 
-from __future__ import annotations
+            self.reward_sum[pair] += reward
+            self.next_screen[pair] = key
 
-from collections import Counter, defaultdict
-from hashlib import blake2b
-from math import sqrt
-from typing import Any, Sequence
+            self._pending = None
 
+            # A new level starts a new movement context.
+            if progressed or state in ("WIN", "GAME_OVER"):
+                self._last_action = None
 
-KEYBOARD_ACTIONS = (
-    "ACTION1",  # up
-    "ACTION2",  # down
-    "ACTION3",  # left
-    "ACTION4",  # right
-    "ACTION5",  # game-dependent key
-)
+        self.visits[key] += 1
 
-OPPOSITE_ACTIONS = {
-    "ACTION1": "ACTION2",
-    "ACTION2": "ACTION1",
-    "ACTION3": "ACTION4",
-    "ACTION4": "ACTION3",
-}
+    def _candidate_actions(self) -> list[str]:
+        """Return actions allowed by the optional V5 rule."""
 
+        candidates = list(self.actions)
 
-def observation_key(
-    frame: Sequence[Any],
-    levels_completed: int,
-    state: str,
-    *,
-    mask_ls20_step_counter: bool = False,
-) -> str:
-    """Generate a stable fingerprint of the current observation.
+        if not self.avoid_immediate_reverse:
+            return candidates
 
-    V6 optionally ignores the bottom-left LS20 step-counter display.
-    The option is disabled by default, preserving existing behavior.
-    """
+        opposite = OPPOSITE_ACTIONS.get(
+            self._last_action
+        )
 
-    final_grid = frame[-1] if frame else []
+        if opposite is None:
+            return candidates
 
-    if mask_ls20_step_counter:
-        try:
-            if (
-                len(final_grid) == 64
-                and all(len(row) == 64 for row in final_grid)
-            ):
-                final_grid = tuple(
-                    tuple(
-                        -1 if (61 <= y <= 62 and 13 <= x < 56)
-                        else int(pixel)
-                        for x, pixel in enumerate(row)
-                    )
-                    for y, row in enumerate(final_grid)
-                )
-        except (TypeError, ValueError, OverflowError):
-            # Nonstandard frames retain their original fingerprint.
-            pass
+        filtered = [
+            action
+            for action in candidates
+            if action != opposite
+        ]
 
-    raw = repr(
-        (state, levels_completed, final_grid)
-    ).encode("utf-8")
+        # Always keep at least one valid action available.
+        return filtered if filtered else candidates
 
-    return blake2b(
-        raw,
-        digest_size=16,
-    ).hexdigest()
-
-
-class FeedbackPolicy:
-    """Choose exploration actions using observed feedback.
-
-    V3: Balanced exploration across visited screens.
-    V5: Optional prevention of immediate opposite actions.
-    V6: State fingerprinting can ignore LS20's step-counter HUD.
-
-    Level completion and scores are never invented.
-    """
-
-    def __init__(
+    def choose(
         self,
-        actions: Sequence[str] = KEYBOARD_ACTIONS,
-        avoid_immediate_reverse: bool = False,
-    ) -> None:
+        key: str,
+        levels_completed: int,
+    ) -> str:
+        """Select an action using balanced exploration.
 
-        if not actions or len(set(actions)) != len(actions):
-            raise ValueError(
+        V5 optionally excludes the immediate reverse direction.
+        Among untried actions, choose the least-used action.
+        Once candidate actions have been explored, use their
+        observed rewards, novelty and exploration bonuses.
+        """
+
+        candidates = self._candidate_actions()
+
+        unseen = [
+            action
+            for action in candidates
+            if self.attempts[(key, action)] == 0
+        ]
+
+        if unseen:
+
+            total_usage = Counter()
+
+            for (_, action), count in self.attempts.items():
+                total_usage[action] += count
+
+            action = min(
+                unseen,
+                key=lambda candidate: (
+                    total_usage[candidate],
+                    self.actions.index(candidate),
+                ),
+            )
+
+        else:
+
+            def value(action_name: str) -> float:
+
+                pair = (key, action_name)
+
+                count = self.attempts[pair]
+
+                mean_reward = (
+                    self.reward_sum[pair] / count
+                )
+
+                destination = self.next_screen.get(pair)
+
+                if destination:
+                    novelty = (
+                        1.5
+                        / sqrt(
+                            1 + self.visits[destination]
+                        )
+                    )
+                else:
+                    novelty = 0.0
+
+                exploration_bonus = (
+                    0.5 / sqrt(count)
+                )
+
+                repeat_penalty = (
+                    0.1 * count
+                )
+
+                return (
+                    mean_reward
+                    + novelty
+                    + exploration_bonus
+                    - repeat_penalty
+                )
+
+            action = max(
+                candidates,
+                key=value,
+            )
+
+        self.attempts[(key, action)] += 1
+
+        self._pending = (
+            key,
