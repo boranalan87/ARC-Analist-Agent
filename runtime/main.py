@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 
 app = FastAPI(
     title="ARC Analist Agent Runtime",
-    version="0.5.0",
+    version="0.5.1",
 )
 
 
@@ -54,7 +54,7 @@ class RunRequest(BaseModel):
 def root():
     return {
         "service": "arc-analist-agent-runtime",
-        "version": "0.5.0",
+        "version": "0.5.1",
         "status": "ok",
         "operation_mode": OPERATION_MODE,
     }
@@ -95,12 +95,17 @@ def health():
 
     available_agents = []
     agent_import_error = None
+    agent_class_version = None
 
     try:
         agents, _ = load_agents()
 
         available_agents = sorted(
             agents.keys()
+        )
+        explorer_class = agents.get("feedbackexplorer")
+        agent_class_version = getattr(
+            explorer_class, "AGENT_VERSION", None
         )
 
         checks["agent_import"] = bool(
@@ -126,6 +131,9 @@ def health():
         "checks": checks,
         "available_agents": available_agents,
         "agent_import_error": agent_import_error,
+        "runtime_version": "0.5.1",
+        "deployment_commit": os.getenv("VERCEL_GIT_COMMIT_SHA") or None,
+        "feedbackexplorer_class_version": agent_class_version,
     }
 
 
@@ -181,6 +189,40 @@ def collect_diagnostics(
         return None
 
     return None
+
+
+def collect_agent_runtime_probe(swarm, agent_name: str, game_id: str):
+    """Observe the actual loaded agent without guessing success or progress.
+
+    No environment internals, secrets, or invented actions are exposed.
+    A missing tracker/planner is represented explicitly as None.
+    """
+    if agent_name != "feedbackexplorer":
+        return None
+
+    for game_agent in swarm.agents:
+        if getattr(game_agent, "game_id", None) != game_id:
+            continue
+
+        policy = getattr(game_agent, "policy", None)
+        planner = getattr(game_agent, "_ls20_visual_planner", None)
+        tracker = getattr(game_agent, "diagnostics", None)
+        nav_fn = getattr(policy, "navigation_summary", None)
+        planner_fn = getattr(planner, "summary", None)
+
+        return {
+            "probe_version": "8.1",
+            "agent_found": True,
+            "agent_class": type(game_agent).__name__,
+            "agent_module": type(game_agent).__module__,
+            "agent_version": getattr(game_agent, "AGENT_VERSION", None),
+            "diagnostics_class": type(tracker).__name__ if tracker is not None else None,
+            "planner_attached": planner is not None,
+            "navigation": nav_fn() if callable(nav_fn) else None,
+            "visible_goal_planning": planner_fn() if callable(planner_fn) else None,
+        }
+
+    return {"probe_version": "8.1", "agent_found": False}
 
 
 @app.post("/run")
@@ -324,6 +366,14 @@ def run(
             agent_name,
             game_id,
         )
+        runtime_probe = collect_agent_runtime_probe(
+            swarm,
+            agent_name,
+            game_id,
+        )
+        if diagnostics is not None and runtime_probe is not None:
+            diagnostics = dict(diagnostics)
+            diagnostics["runtime_probe_v8_1"] = runtime_probe
 
         return {
             "status": "COMPLETED",
@@ -334,6 +384,9 @@ def run(
             "scorecard": scorecard_data,
             "game_result": game_result,
             "diagnostics": diagnostics,
+            "runtime_probe": runtime_probe,
+            "runtime_version": "0.5.1",
+            "deployment_commit": os.getenv("VERCEL_GIT_COMMIT_SHA") or None,
             "evidence": (
                 "Result returned directly "
                 "by the ARC Swarm/Arcade "
