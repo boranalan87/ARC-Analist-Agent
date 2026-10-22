@@ -1,112 +1,3 @@
-"""Experimental LS20 first-level planning using only rendered 64x64 frames.
-
-No hidden environment state, internal sprites, or level solution is read.
-When visible player, goal, and pose indicators cannot be identified confidently,
-return None and let the existing V7 policy decide. This is not a game solver.
-"""
-
-from __future__ import annotations
-
-from collections import deque
-from typing import Any, Sequence
-
-DIRECTIONS = {
-    "ACTION1": (0, -5),
-    "ACTION2": (0, 5),
-    "ACTION3": (-5, 0),
-    "ACTION4": (5, 0),
-}
-
-
-def visible_grid(frames: Sequence[Any]) -> list[list[int]] | None:
-    """Decode the most recent visible 64x64 frame, or fail closed."""
-    try:
-        if frames is None or len(frames) == 0:
-            return None
-        grid = frames[-1]
-        if len(grid) != 64 or any(len(row) != 64 for row in grid):
-            return None
-        return [[int(cell) for cell in row] for row in grid]
-    except (TypeError, ValueError, OverflowError, IndexError):
-        return None
-
-
-def locate_player(grid: list[list[int]]) -> tuple[int, int] | None:
-    """Find the unique rendered 5x5 LS20 cursor (two 12 rows, three 9)."""
-    matches = []
-    for y in range(0, 56, 5):
-        for x in range(4, 60, 5):
-            if (all(grid[y + dy][x + dx] == (12 if dy < 2 else 9)
-                    for dy in range(5) for dx in range(5))):
-                matches.append((x, y))
-    return matches[0] if len(matches) == 1 else None
-
-
-def locate_goal(grid: list[list[int]]) -> tuple[int, int] | None:
-    """Find a visible 5x5 goal pad with 5 background and 9 icon pixels.
-
-    This is a cautious recognition heuristic specific to LS20's public
-    rendered graphics; ambiguity results in no plan, never a guessed goal.
-    """
-    matches = []
-    for y in range(0, 56, 5):
-        for x in range(4, 60, 5):
-            tile = [grid[y + dy][x + dx] for dy in range(5) for dx in range(5)]
-            if (tile.count(5) >= 11 and 3 <= tile.count(9) <= 12
-                    and 4 not in tile and 12 not in tile):
-                matches.append((x, y))
-    return matches[0] if len(matches) == 1 else None
-
-
-def locate_rotation_switch(grid: list[list[int]]) -> tuple[int, int] | None:
-    """Identify the rendered LS20 rotation tile's distinctive 0/1 symbol."""
-    matches = []
-    for y in range(0, 56, 5):
-        for x in range(4, 60, 5):
-            if (grid[y+1][x+2] == 0 and grid[y+2][x+1] == 1
-                    and grid[y+2][x+2] == 0 and grid[y+2][x+3] == 0
-                    and grid[y+3][x+2] == 1):
-                matches.append((x, y))
-    return matches[0] if len(matches) == 1 else None
-
-
-def _shape_mask(grid: list[list[int]], x: int, y: int, *, scale: int) -> tuple[tuple[bool, ...], ...] | None:
-    """Read a 3x3 colored shape from visible pixels (optionally 2x HUD)."""
-    result = []
-    for dy in range(3):
-        row = []
-        for dx in range(3):
-            pixels = [grid[y + scale*dy + sy][x + scale*dx + sx]
-                      for sy in range(scale) for sx in range(scale)]
-            colored = sum(1 for p in pixels if p == 9)
-            if 0 < colored < len(pixels):
-                return None  # HUD pixel scaling must be unambiguous.
-            row.append(colored == len(pixels))
-        result.append(tuple(row))
-    shape = tuple(result)
-    return shape if 3 <= sum(sum(r) for r in shape) <= 7 else None
-
-
-def _turn_clockwise(shape: tuple[tuple[bool, ...], ...]) -> tuple[tuple[bool, ...], ...]:
-    return tuple(tuple(shape[2-x][y] for x in range(3)) for y in range(3))
-
-
-def shape_rotations_needed(grid: list[list[int]], goal: tuple[int, int]) -> int | None:
-    """Read displayed bottom-left 2x HUD shape and visible goal icon.
-
-    Returns number of clockwise 90-degree turns, or None when ambiguous.
-    Only the 9-colored first-level symbols are supported.
-    """
-    gx, gy = goal
-    target = _shape_mask(grid, gx+1, gy+1, scale=1)
-    current = _shape_mask(grid, 3, 55, scale=2)
-    if target is None or current is None:
-        return None
-    rotated = current
-    for count in range(4):
-        if rotated == target:
-            return count
-        rotated = _turn_clockwise(rotated)
     return None
 
 
@@ -156,16 +47,20 @@ class LS20VisualPlanner:
         self._pending: tuple[tuple[int, int], str, int] | None = None
         self._blocked: set[tuple[tuple[int, int], str]] = set()
         self._last_level: int | None = None
+        self.level2_proposals = 0
+        self.level2_fallbacks = 0
 
     def reset_pending(self) -> None:
+        """Forget temporary move blocks after a game reset."""
         self._pending = None
+        self._blocked.clear()
 
     def propose(self, frames: Sequence[Any], level: int, candidates: Sequence[str]) -> str | None:
         if self._last_level is not None and level != self._last_level:
             self._blocked.clear()
             self._pending = None
         self._last_level = level
-        if level != 0:
+        if level not in (0, LS20_LEVEL_2_INDEX):
             return self._fallback("unvalidated_level")
         grid = visible_grid(frames)
         if grid is None:
@@ -175,6 +70,18 @@ class LS20VisualPlanner:
         if player is None or goal is None:
             self._pending = None
             return self._fallback("player_or_goal_not_visible")
+
+        # Activating a level-1 heuristic in all higher levels would be unsafe.
+        # Restrict level-2 use to the layout observed in three REAL frames.
+        # Revalidate the switch each time; no frame fingerprint memorization.
+        rotation_tile = None
+        if level == LS20_LEVEL_2_INDEX:
+            rotation_tile = locate_rotation_switch(grid)
+            if (goal != LEVEL_2_GOAL
+                    or rotation_tile != LEVEL_2_ROTATION_SWITCH):
+                self._pending = None
+                return self._fallback("unvalidated_level")
+
         if self._pending is not None:
             previous, action, previous_level = self._pending
             if previous_level == level and previous == player:
@@ -186,7 +93,8 @@ class LS20VisualPlanner:
         if turns is None:
             return self._fallback("pose_not_visible")
         if turns:
-            rotation_tile = locate_rotation_switch(grid)
+            if rotation_tile is None:
+                rotation_tile = locate_rotation_switch(grid)
             if rotation_tile is None:
                 return self._fallback("rotation_switch_not_visible")
             destination = rotation_tile
@@ -201,19 +109,20 @@ class LS20VisualPlanner:
         self._pending = (player, action, level)
         self.last_reason = reason
         self.proposals += 1
+        if level == LS20_LEVEL_2_INDEX:
+            self.level2_proposals += 1
         return action
 
     def _fallback(self, reason: str) -> None:
         self.last_reason = reason
         self.fallbacks += 1
+        if self._last_level == LS20_LEVEL_2_INDEX:
+            self.level2_fallbacks += 1
         return None
 
     def summary(self) -> dict[str, int | bool | str]:
         return {
             "enabled": True,
-            "scope": "ls20_level_1_visible_frames",
+            "scope": "ls20_levels_1_and_validated_2_visible_frames",
             "proposed_actions": self.proposals,
             "fallbacks": self.fallbacks,
-            "blocked_moves": self.blocked_moves,
-            "last_reason": self.last_reason,
-        }
