@@ -24,6 +24,8 @@ from .ls20_visual_planner import LS20VisualPlanner
 class FeedbackExplorer(Agent):
     """Explore keyboard games and record observed outcomes."""
 
+    AGENT_VERSION = "8.1"
+
     MAX_ACTIONS = 80
 
     def __init__(
