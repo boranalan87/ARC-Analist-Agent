@@ -1,11 +1,11 @@
 """Keyboard frame-aware ARC-AGI-3 exploration agent.
 
-FeedbackExplorer V7:
+FeedbackExplorer V8:
 - Preserve V3 balanced action exploration.
 - Preserve V4 LS20 action compatibility (ACTION1 through ACTION4).
 - Preserve V5 immediate reverse movement prevention for LS20.
 - Preserve V6 LS20 step-counter HUD masking.
-- Enable V7 observed-state graph navigation for LS20 only.
+- Retain V7 graph navigation; optionally prefer visible LS20 goal paths.
 - Preserve other games' default policy and real diagnostics.
 
 This agent explores the game but does not guarantee a solution.
@@ -18,6 +18,7 @@ from arcengine import FrameData, GameAction, GameState
 from ..agent import Agent
 from .feedback_policy import FeedbackPolicy, observation_key
 from .feedback_diagnostics_v2 import FeedbackDiagnosticsV2
+from .ls20_visual_planner import LS20VisualPlanner
 
 
 class FeedbackExplorer(Agent):
@@ -52,9 +53,18 @@ class FeedbackExplorer(Agent):
         else:
             self.policy = FeedbackPolicy()
 
+        # Existing V4 tests execute the constructor with dependency stubs.
+        # In production the imported planner is always available.
+        planner_class = globals().get("LS20VisualPlanner")
+        self._ls20_visual_planner = (
+            planner_class()
+            if self._mask_ls20_step_counter and planner_class is not None
+            else None
+        )
         self.diagnostics = FeedbackDiagnosticsV2(
             policy=self.policy
         )
+        self.diagnostics.visual_planner = self._ls20_visual_planner
 
     def is_done(
         self,
@@ -91,9 +101,11 @@ class FeedbackExplorer(Agent):
                 )
 
             self.policy.clear_pending()
+            if self._ls20_visual_planner is not None:
+                self._ls20_visual_planner.reset_pending()
             action = GameAction.RESET
             action.reasoning = (
-                "FeedbackExplorer V7: start or restart game"
+                "FeedbackExplorer V8: start or restart game"
             )
             return action
 
@@ -110,18 +122,31 @@ class FeedbackExplorer(Agent):
             latest_frame.levels_completed,
             state.name,
         )
-        action_name = self.policy.choose(
-            key,
-            latest_frame.levels_completed,
-        )
+        proposed = None
+        if self._ls20_visual_planner is not None:
+            proposed = self._ls20_visual_planner.propose(
+                latest_frame.frame,
+                latest_frame.levels_completed,
+                self.policy._candidate_actions(),
+            )
+        if proposed is not None:
+            action_name = self.policy.choose(
+                key, latest_frame.levels_completed,
+                preferred_action=proposed,
+            )
+        else:
+            action_name = self.policy.choose(
+                key, latest_frame.levels_completed,
+            )
         action = GameAction.from_name(action_name)
         action.reasoning = (
-            f"FeedbackExplorer V7: {action_name}; "
+            f"FeedbackExplorer V8: {action_name}; "
             f"state_visits={self.policy.visits[key]}; "
             f"trials={self.policy.attempts[(key, action_name)]}; "
             f"avoid_reverse={self.policy.avoid_immediate_reverse}; "
             f"mask_ls20_step_counter={self._mask_ls20_step_counter}; "
-            f"navigation={getattr(self.policy, 'enable_navigation', False)}"
+            f"navigation={getattr(self.policy, 'enable_navigation', False)}; "
+            f"visible_goal_plan={proposed is not None}"
         )
         return action
 

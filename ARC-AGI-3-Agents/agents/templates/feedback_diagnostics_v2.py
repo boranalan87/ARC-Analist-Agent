@@ -94,6 +94,17 @@ class FeedbackDiagnosticsV2(FeedbackDiagnostics):
                 "unchanged": outcomes["unchanged"],
                 "progress_rate": round(outcomes["progressed"] / count, 4),
             }
+        # Additional V8 opt-in telemetry; legacy V2 fields stay untouched.
+        policy_navigation = (
+            self.policy.navigation_summary()
+            if self.policy is not None
+            and callable(getattr(self.policy, "navigation_summary", None))
+            else None
+        )
+        visual_planner = getattr(self, "visual_planner", None)
+        visible_goal = (
+            visual_planner.summary() if visual_planner is not None else None
+        )
         base["v2"] = {
             "version": 2,
             "frame_change_rate": (
@@ -109,5 +120,7 @@ class FeedbackDiagnosticsV2(FeedbackDiagnostics):
             "history_truncated": total > len(self._events),
             "recent_actions": list(self._events),
             "policy_memory": self._memory_summary(),
+            "navigation": policy_navigation,
+            "visible_goal_planning": visible_goal,
         }
         return base
