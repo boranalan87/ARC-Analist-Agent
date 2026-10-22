@@ -1,191 +1,97 @@
-"""Keyboard frame-aware ARC-AGI-3 exploration agent.
+"""FeedbackExplorer V8.3 — conservative LS20 visible-frame route planner.
 
-FeedbackExplorer V8:
-- Preserve V3 balanced action exploration.
-- Preserve V4 LS20 action compatibility (ACTION1 through ACTION4).
-- Preserve V5 immediate reverse movement prevention for LS20.
-- Preserve V6 LS20 step-counter HUD masking.
-- Retain V7 graph navigation; optionally prefer visible LS20 goal paths.
-- Preserve other games' default policy and real diagnostics.
+Uses only rendered 64x64 game pixels. Level 1 (index 0) follows the old
+V8.1 planner. Level 2 (index 1) is gated by the positions of two unique,
+observable landmarks independently confirmed in three genuine level-2 frames.
+Unrecognized frames fall back to the existing exploration policy.
 
-This agent explores the game but does not guarantee a solution.
+No hidden game state or precomputed solution is used. This is NOT proof of
+level completion, and a valid-looking path is not necessarily a winning path.
 """
 
-from typing import Any
+from __future__ import annotations
 
-from arcengine import FrameData, GameAction, GameState
+from collections import deque
+from operator import index
+from typing import Any, Sequence
 
-from ..agent import Agent
-from .feedback_policy import FeedbackPolicy, observation_key
-from .feedback_diagnostics_v2 import FeedbackDiagnosticsV2
-from .ls20_visual_planner import LS20VisualPlanner
-from .ls20_level2_frame_capture import LS20Level2FrameCapture
+LS20_LEVEL_2_INDEX = 1
+# Positions were observed in real level-2 frames 1, 6 and 16 (22 Oct 2026).
+LEVEL_2_GOAL = (14, 40)
+LEVEL_2_ROTATION_SWITCH = (49, 45)
+
+DIRECTIONS = {
+    "ACTION1": (0, -5),
+    "ACTION2": (0, 5),
+    "ACTION3": (-5, 0),
+    "ACTION4": (5, 0),
+}
 
 
-class FeedbackExplorer(Agent):
-    """Explore keyboard games and record observed outcomes."""
+def visible_grid(frames: Sequence[Any]) -> list[list[int]] | None:
+    """Decode the most recent visible 64x64 frame, or fail closed."""
+    try:
+        if frames is None or len(frames) == 0:
+            return None
+        grid = frames[-1]
+        if len(grid) != 64 or any(len(row) != 64 for row in grid):
+            return None
+        result = []
+        for row in grid:
+            out_row = []
+            for cell in row:
+                pixel = index(cell)  # unlike int(), rejects float and text
+                if not 0 <= pixel <= 255:
+                    return None
+                out_row.append(pixel)
+            result.append(out_row)
+        return result
+    except (TypeError, ValueError, OverflowError, IndexError):
+        return None
 
-    AGENT_VERSION = "8.1"
 
-    MAX_ACTIONS = 80
+def locate_player(grid: list[list[int]]) -> tuple[int, int] | None:
+    """Find the unique rendered 5x5 LS20 cursor (two 12 rows, three 9)."""
+    matches = []
+    for y in range(0, 56, 5):
+        for x in range(4, 60, 5):
+            if (all(grid[y + dy][x + dx] == (12 if dy < 2 else 9)
+                    for dy in range(5) for dx in range(5))):
+                matches.append((x, y))
+    return matches[0] if len(matches) == 1 else None
 
-    def __init__(
-        self,
-        *args: Any,
-        **kwargs: Any,
-    ) -> None:
-        super().__init__(*args, **kwargs)
 
-        self._mask_ls20_step_counter = (
-            self.game_id == "ls20-9607627b"
-        )
+def locate_goal(grid: list[list[int]]) -> tuple[int, int] | None:
+    """Find a visible 5x5 goal pad with 5 background and 9 icon pixels.
 
-        if self._mask_ls20_step_counter:
-            self.policy = FeedbackPolicy(
-                actions=(
-                    "ACTION1",
-                    "ACTION2",
-                    "ACTION3",
-                    "ACTION4",
-                )
-            )
-            # Keep assignments compatible with V4 constructor test stubs.
-            self.policy.avoid_immediate_reverse = True
-            self.policy.enable_navigation = True
+    This is a cautious recognition heuristic specific to LS20's public
+    rendered graphics; ambiguity results in no plan, never a guessed goal.
+    """
+    matches = []
+    for y in range(0, 56, 5):
+        for x in range(4, 60, 5):
+            tile = [grid[y + dy][x + dx] for dy in range(5) for dx in range(5)]
+            if (tile.count(5) >= 11 and 3 <= tile.count(9) <= 12
+                    and 4 not in tile and 12 not in tile):
+                matches.append((x, y))
+    return matches[0] if len(matches) == 1 else None
 
-        else:
-            self.policy = FeedbackPolicy()
 
-        # Existing V4 tests execute the constructor with dependency stubs.
-        # In production the imported planner is always available.
-        planner_class = globals().get("LS20VisualPlanner")
-        self._ls20_visual_planner = (
-            planner_class()
-            if self._mask_ls20_step_counter and planner_class is not None
-            else None
-        )
-        self.diagnostics = FeedbackDiagnosticsV2(
-            policy=self.policy
-        )
-        self.diagnostics.visual_planner = self._ls20_visual_planner
-        # V8.2 phase 2: observe rendered LS20 level-2 pixels only. Captured
-        # samples are read-only and never influence action selection.
-        # globals().get maintains compatibility with lightweight V4 test stubs.
-        capture_class = globals().get("LS20Level2FrameCapture")
-        self._ls20_level2_capture = (
-            capture_class()
-            if self._mask_ls20_step_counter and capture_class is not None
-            else None
-        )
-        self.diagnostics.level2_frame_capture = self._ls20_level2_capture
+def locate_rotation_switch(grid: list[list[int]]) -> tuple[int, int] | None:
+    """Identify the rendered LS20 rotation tile's distinctive 0/1 symbol."""
+    matches = []
+    for y in range(0, 56, 5):
+        for x in range(4, 60, 5):
+            if (grid[y+1][x+2] == 0 and grid[y+2][x+1] == 1
+                    and grid[y+2][x+2] == 0 and grid[y+2][x+3] == 0
+                    and grid[y+3][x+2] == 1):
+                matches.append((x, y))
+    return matches[0] if len(matches) == 1 else None
 
-    def is_done(
-        self,
-        frames: list[FrameData],
-        latest_frame: FrameData,
-    ) -> bool:
-        """Stop only when the game reports WIN."""
-        return latest_frame.state is GameState.WIN
 
-    def choose_action(
-        self,
-        frames: list[FrameData],
-        latest_frame: FrameData,
-    ) -> GameAction:
-        """Choose an action from real feedback and observed game state."""
-        state = latest_frame.state
+def _shape_mask(grid: list[list[int]], x: int, y: int, *, scale: int) -> tuple[tuple[bool, ...], ...] | None:
+    """Read a 3x3 colored shape from visible pixels (optionally 2x HUD)."""
+    result = []
+    for dy in range(3):
+        row = []
 
-        if state in (
-            GameState.NOT_PLAYED,
-            GameState.GAME_OVER,
-        ):
-            if state is GameState.GAME_OVER:
-                self.policy.observe(
-                    observation_key(
-                        latest_frame.frame,
-                        latest_frame.levels_completed,
-                        state.name,
-                        mask_ls20_step_counter=(
-                            self._mask_ls20_step_counter
-                        ),
-                    ),
-                    latest_frame.levels_completed,
-                    state.name,
-                )
-
-            self.policy.clear_pending()
-            if self._ls20_visual_planner is not None:
-                self._ls20_visual_planner.reset_pending()
-            action = GameAction.RESET
-            action.reasoning = (
-                "FeedbackExplorer V8: start or restart game"
-            )
-            return action
-
-        key = observation_key(
-            latest_frame.frame,
-            latest_frame.levels_completed,
-            state.name,
-            mask_ls20_step_counter=(
-                self._mask_ls20_step_counter
-            ),
-        )
-        self.policy.observe(
-            key,
-            latest_frame.levels_completed,
-            state.name,
-        )
-        # Evidence-only sampling. The existing V8.1 planner and policy
-        # below choose the action without consulting this recorder.
-        if self._ls20_level2_capture is not None:
-            self._ls20_level2_capture.observe(
-                latest_frame.frame,
-                level=latest_frame.levels_completed,
-            )
-        proposed = None
-        if self._ls20_visual_planner is not None:
-            proposed = self._ls20_visual_planner.propose(
-                latest_frame.frame,
-                latest_frame.levels_completed,
-                self.policy._candidate_actions(),
-            )
-        if proposed is not None:
-            action_name = self.policy.choose(
-                key, latest_frame.levels_completed,
-                preferred_action=proposed,
-            )
-        else:
-            action_name = self.policy.choose(
-                key, latest_frame.levels_completed,
-            )
-        action = GameAction.from_name(action_name)
-        action.reasoning = (
-            f"FeedbackExplorer V8: {action_name}; "
-            f"state_visits={self.policy.visits[key]}; "
-            f"trials={self.policy.attempts[(key, action_name)]}; "
-            f"avoid_reverse={self.policy.avoid_immediate_reverse}; "
-            f"mask_ls20_step_counter={self._mask_ls20_step_counter}; "
-            f"navigation={getattr(self.policy, 'enable_navigation', False)}; "
-            f"visible_goal_plan={proposed is not None}"
-        )
-        return action
-
-    def take_action(
-        self,
-        action: GameAction,
-    ) -> FrameData | None:
-        """Execute a real action and record its unmodified outcome."""
-        before = self.frames[-1]
-        after = super().take_action(action)
-
-        if after is not None:
-            self.diagnostics.record_action(
-                action=action.name,
-                before_frame=before.frame,
-                after_frame=after.frame,
-                before_levels=before.levels_completed,
-                after_levels=after.levels_completed,
-                after_state=after.state.name,
-            )
-
-        return after
