@@ -1,11 +1,12 @@
 """Keyboard frame-aware ARC-AGI-3 exploration agent.
 
-FeedbackExplorer V8:
+FeedbackExplorer V8.3:
 - Preserve V3 balanced action exploration.
 - Preserve V4 LS20 action compatibility (ACTION1 through ACTION4).
 - Preserve V5 immediate reverse movement prevention for LS20.
 - Preserve V6 LS20 step-counter HUD masking.
 - Retain V7 graph navigation; optionally prefer visible LS20 goal paths.
+- Enable conservatively validated LS20 level-2 visible planning.
 - Preserve other games' default policy and real diagnostics.
 
 This agent explores the game but does not guarantee a solution.
@@ -25,7 +26,7 @@ from .ls20_level2_frame_capture import LS20Level2FrameCapture
 class FeedbackExplorer(Agent):
     """Explore keyboard games and record observed outcomes."""
 
-    AGENT_VERSION = "8.1"
+    AGENT_VERSION = "8.3"
 
     MAX_ACTIONS = 80
 
@@ -39,6 +40,11 @@ class FeedbackExplorer(Agent):
         self._mask_ls20_step_counter = (
             self.game_id == "ls20-9607627b"
         )
+        # Agent.main() runs while action_counter <= MAX_ACTIONS; therefore
+        # 179 permits at most 180 actions. Preserve 81-action behavior in
+        # other games, where MAX_ACTIONS stays at 80.
+        if self._mask_ls20_step_counter:
+            self.MAX_ACTIONS = 179
 
         if self._mask_ls20_step_counter:
             self.policy = FeedbackPolicy(
@@ -68,9 +74,8 @@ class FeedbackExplorer(Agent):
             policy=self.policy
         )
         self.diagnostics.visual_planner = self._ls20_visual_planner
-        # V8.2 phase 2: observe rendered LS20 level-2 pixels only. Captured
-        # samples are read-only and never influence action selection.
-        # globals().get maintains compatibility with lightweight V4 test stubs.
+
+        # Capture level-2 evidence without modifying recorded frames.
         capture_class = globals().get("LS20Level2FrameCapture")
         self._ls20_level2_capture = (
             capture_class()
@@ -116,9 +121,10 @@ class FeedbackExplorer(Agent):
             self.policy.clear_pending()
             if self._ls20_visual_planner is not None:
                 self._ls20_visual_planner.reset_pending()
+
             action = GameAction.RESET
             action.reasoning = (
-                "FeedbackExplorer V8: start or restart game"
+                "FeedbackExplorer V8.3: start or restart game"
             )
             return action
 
@@ -135,13 +141,13 @@ class FeedbackExplorer(Agent):
             latest_frame.levels_completed,
             state.name,
         )
-        # Evidence-only sampling. The existing V8.1 planner and policy
-        # below choose the action without consulting this recorder.
+
         if self._ls20_level2_capture is not None:
             self._ls20_level2_capture.observe(
                 latest_frame.frame,
                 level=latest_frame.levels_completed,
             )
+
         proposed = None
         if self._ls20_visual_planner is not None:
             proposed = self._ls20_visual_planner.propose(
@@ -149,18 +155,22 @@ class FeedbackExplorer(Agent):
                 latest_frame.levels_completed,
                 self.policy._candidate_actions(),
             )
+
         if proposed is not None:
             action_name = self.policy.choose(
-                key, latest_frame.levels_completed,
+                key,
+                latest_frame.levels_completed,
                 preferred_action=proposed,
             )
         else:
             action_name = self.policy.choose(
-                key, latest_frame.levels_completed,
+                key,
+                latest_frame.levels_completed,
             )
+
         action = GameAction.from_name(action_name)
         action.reasoning = (
-            f"FeedbackExplorer V8: {action_name}; "
+            f"FeedbackExplorer V8.3: {action_name}; "
             f"state_visits={self.policy.visits[key]}; "
             f"trials={self.policy.attempts[(key, action_name)]}; "
             f"avoid_reverse={self.policy.avoid_immediate_reverse}; "
