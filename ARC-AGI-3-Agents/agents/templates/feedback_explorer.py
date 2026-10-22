@@ -19,6 +19,7 @@ from ..agent import Agent
 from .feedback_policy import FeedbackPolicy, observation_key
 from .feedback_diagnostics_v2 import FeedbackDiagnosticsV2
 from .ls20_visual_planner import LS20VisualPlanner
+from .ls20_level2_frame_capture import LS20Level2FrameCapture
 
 
 class FeedbackExplorer(Agent):
@@ -67,6 +68,16 @@ class FeedbackExplorer(Agent):
             policy=self.policy
         )
         self.diagnostics.visual_planner = self._ls20_visual_planner
+        # V8.2 phase 2: observe rendered LS20 level-2 pixels only. Captured
+        # samples are read-only and never influence action selection.
+        # globals().get maintains compatibility with lightweight V4 test stubs.
+        capture_class = globals().get("LS20Level2FrameCapture")
+        self._ls20_level2_capture = (
+            capture_class()
+            if self._mask_ls20_step_counter and capture_class is not None
+            else None
+        )
+        self.diagnostics.level2_frame_capture = self._ls20_level2_capture
 
     def is_done(
         self,
@@ -124,6 +135,13 @@ class FeedbackExplorer(Agent):
             latest_frame.levels_completed,
             state.name,
         )
+        # Evidence-only sampling. The existing V8.1 planner and policy
+        # below choose the action without consulting this recorder.
+        if self._ls20_level2_capture is not None:
+            self._ls20_level2_capture.observe(
+                latest_frame.frame,
+                level=latest_frame.levels_completed,
+            )
         proposed = None
         if self._ls20_visual_planner is not None:
             proposed = self._ls20_visual_planner.propose(
