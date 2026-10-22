@@ -1,6 +1,6 @@
 """Dependency-free feedback policy for keyboard ARC-AGI-3 games.
 
-FeedbackExplorer V7:
+FeedbackExplorer V8 (V7 policy plus optional visual goal preference):
 - Preserve V3 balanced exploration and observation-based rewards.
 - Preserve V5 optional immediate reverse-movement prevention.
 - Preserve V6 optional LS20 step-counter HUD masking.
@@ -254,7 +254,10 @@ class FeedbackPolicy:
                         )
         return score
 
-    def choose(self, key: str, levels_completed: int) -> str:
+    def choose(
+        self, key: str, levels_completed: int, *,
+        preferred_action: str | None = None,
+    ) -> str:
         """Try local unseen actions, then navigate to observed frontiers.
 
         If no frontier is reachable, fall back to reward-based exploration.
@@ -266,7 +269,10 @@ class FeedbackPolicy:
             if self.attempts[(key, action)] == 0
         ]
 
-        if unseen:
+        if preferred_action in candidates:
+            # V8: Prefer only an action inferred from a visible LS20 frame.
+            action = preferred_action
+        elif unseen:
             total_usage: Counter[str] = Counter()
             for (_, previous_action), count in self.attempts.items():
                 total_usage[previous_action] += count
