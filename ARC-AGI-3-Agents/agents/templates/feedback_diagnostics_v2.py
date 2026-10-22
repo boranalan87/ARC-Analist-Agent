@@ -1,4 +1,9 @@
-"""Bounded V2 telemetry; preserves all existing V1 summary fields."""
+"""Bounded V2 telemetry; preserves all existing V1 summary fields.
+
+V8.2 phase-2 adds optional, bounded LS20 level-2 visible-frame evidence.
+Only the explicitly attached capture object's public summary is exported;
+other game diagnostics and action-selection behavior remain unchanged.
+"""
 
 from __future__ import annotations
 
@@ -9,7 +14,7 @@ from .feedback_diagnostics import FeedbackDiagnostics, screen_key
 
 
 class FeedbackDiagnosticsV2(FeedbackDiagnostics):
-    """Keep action-level outcomes without retaining raw game frames."""
+    """Keep action-level outcomes and optionally bounded visible-frame evidence."""
 
     def __init__(self, policy: Any = None, max_events: int = 100) -> None:
         if not isinstance(max_events, int) or not 1 <= max_events <= 1000:
@@ -105,6 +110,13 @@ class FeedbackDiagnosticsV2(FeedbackDiagnostics):
         visible_goal = (
             visual_planner.summary() if visual_planner is not None else None
         )
+        # V8.2: Expose up to three real, rendered LS20 level-2 images for
+        # offline validation. Never infer that samples exist if none were seen.
+        capture = getattr(self, "level2_frame_capture", None)
+        level2_capture = (
+            capture.summary() if capture is not None
+            and callable(getattr(capture, "summary", None)) else None
+        )
         base["v2"] = {
             "version": 2,
             "frame_change_rate": (
@@ -122,5 +134,6 @@ class FeedbackDiagnosticsV2(FeedbackDiagnostics):
             "policy_memory": self._memory_summary(),
             "navigation": policy_navigation,
             "visible_goal_planning": visible_goal,
+            "level2_frame_capture": level2_capture,
         }
         return base
