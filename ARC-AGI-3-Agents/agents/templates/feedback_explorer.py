@@ -1,6 +1,6 @@
 """Keyboard frame-aware ARC-AGI-3 exploration agent.
 
-FeedbackExplorer V8.3:
+FeedbackExplorer V8.4:
 - Preserve V3 balanced action exploration.
 - Preserve V4 LS20 action compatibility (ACTION1 through ACTION4).
 - Preserve V5 immediate reverse movement prevention for LS20.
@@ -26,7 +26,7 @@ from .ls20_level2_frame_capture import LS20Level2FrameCapture
 class FeedbackExplorer(Agent):
     """Explore keyboard games and record observed outcomes."""
 
-    AGENT_VERSION = "8.3"
+    AGENT_VERSION = "8.4"
 
     MAX_ACTIONS = 80
 
@@ -124,7 +124,7 @@ class FeedbackExplorer(Agent):
 
             action = GameAction.RESET
             action.reasoning = (
-                "FeedbackExplorer V8.3: start or restart game"
+                "FeedbackExplorer V8.4: start or restart game"
             )
             return action
 
@@ -148,19 +148,43 @@ class FeedbackExplorer(Agent):
                 level=latest_frame.levels_completed,
             )
 
+        # V8.4: only on LS20 level 2, allow a validated pixel-based route
+        # to suggest a necessary reverse move. Other levels retain the V8.3
+        # reverse guard, and all non-visual choices use the legacy policy.
+        allowed_actions = self.policy._candidate_actions()
+        level2_visual = (
+            self._ls20_visual_planner is not None
+            and latest_frame.levels_completed == 1
+        )
+        planner_candidates = (
+            getattr(self.policy, "actions", tuple(allowed_actions))
+            if level2_visual else allowed_actions
+        )
         proposed = None
         if self._ls20_visual_planner is not None:
             proposed = self._ls20_visual_planner.propose(
                 latest_frame.frame,
                 latest_frame.levels_completed,
-                self.policy._candidate_actions(),
+                planner_candidates,
             )
 
+        reverse_override = bool(
+            level2_visual
+            and proposed is not None
+            and proposed not in allowed_actions
+            and proposed in planner_candidates
+        )
         if proposed is not None:
+            # Pass the new option only when actually required, maintaining
+            # compatibility with existing policy/test adapter signatures.
+            preference_options = (
+                {"allow_preferred_reverse": True} if reverse_override else {}
+            )
             action_name = self.policy.choose(
                 key,
                 latest_frame.levels_completed,
                 preferred_action=proposed,
+                **preference_options,
             )
         else:
             action_name = self.policy.choose(
@@ -168,9 +192,14 @@ class FeedbackExplorer(Agent):
                 latest_frame.levels_completed,
             )
 
+        if self._ls20_visual_planner is not None:
+            report = getattr(self._ls20_visual_planner, "record_choice", None)
+            if callable(report):
+                report(proposed, action_name, reverse_override=reverse_override)
+
         action = GameAction.from_name(action_name)
         action.reasoning = (
-            f"FeedbackExplorer V8.3: {action_name}; "
+            f"FeedbackExplorer V8.4: {action_name}; "
             f"state_visits={self.policy.visits[key]}; "
             f"trials={self.policy.attempts[(key, action_name)]}; "
             f"avoid_reverse={self.policy.avoid_immediate_reverse}; "

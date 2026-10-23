@@ -257,6 +257,7 @@ class FeedbackPolicy:
     def choose(
         self, key: str, levels_completed: int, *,
         preferred_action: str | None = None,
+        allow_preferred_reverse: bool = False,
     ) -> str:
         """Try local unseen actions, then navigate to observed frontiers.
 
@@ -269,7 +270,11 @@ class FeedbackPolicy:
             if self.attempts[(key, action)] == 0
         ]
 
-        if preferred_action in candidates:
+        if allow_preferred_reverse and preferred_action in self.actions:
+            # V8.4: callers may *explicitly* honor a validated visual route
+            # even if V5's immediate-reverse heuristic filtered this move.
+            action = preferred_action
+        elif preferred_action in candidates:
             # V8: Prefer only an action inferred from a visible LS20 frame.
             action = preferred_action
         elif unseen:

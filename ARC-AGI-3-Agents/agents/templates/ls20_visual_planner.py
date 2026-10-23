@@ -236,6 +236,10 @@ class LS20VisualPlanner:
         self._last_level: int | None = None
         self.level2_proposals = 0
         self.level2_fallbacks = 0
+        # Run-local counters; selecting a route is NOT proof of progress.
+        self.preferred_actions_applied = 0
+        self.preferred_actions_rejected = 0
+        self.level2_reverse_filter_overrides = 0
 
     def reset_pending(self) -> None:
         """Clear temporary movement information after a reset."""
@@ -334,6 +338,23 @@ class LS20VisualPlanner:
 
         return action
 
+    def record_choice(
+        self,
+        proposal: str | None,
+        selected: str,
+        *,
+        reverse_override: bool = False,
+    ) -> None:
+        """Count choices actually selected; never claim a level was solved."""
+        if proposal is None:
+            return
+        if selected == proposal:
+            self.preferred_actions_applied += 1
+            if reverse_override:
+                self.level2_reverse_filter_overrides += 1
+        else:
+            self.preferred_actions_rejected += 1
+
     def _fallback(self, reason: str) -> None:
         self.last_reason = reason
         self.fallbacks += 1
@@ -352,5 +373,8 @@ class LS20VisualPlanner:
             "blocked_moves": self.blocked_moves,
             "level2_proposed_actions": self.level2_proposals,
             "level2_fallbacks": self.level2_fallbacks,
+            "preferred_actions_applied": self.preferred_actions_applied,
+            "preferred_actions_rejected": self.preferred_actions_rejected,
+            "level2_reverse_filter_overrides": self.level2_reverse_filter_overrides,
             "last_reason": self.last_reason,
         }
