@@ -1,0 +1,54 @@
+name: Apply FeedbackExplorer V8.4 (no local Python)
+
+on:
+  push:
+    branches:
+      - feat/feedback-explorer-v8-4-visual-route-recovery
+
+permissions:
+  contents: write
+
+jobs:
+  apply-and-test:
+    if: github.ref == 'refs/heads/feat/feedback-explorer-v8-4-visual-route-recovery'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get V8.4 branch
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+
+      - name: Install Python on GitHub runner (not user's PC)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Apply V8.4 once (preserve existing V8.4 sources on later runs)
+        run: |
+          if grep -q 'AGENT_VERSION = "8.4"' ARC-AGI-3-Agents/agents/templates/feedback_explorer.py; then
+            echo "V8.4 already applied; validating existing sources."
+          else
+            python upgrade_v84.py --check
+            python upgrade_v84.py --apply
+          fi
+
+      - name: Run V8.4 and existing FeedbackExplorer tests
+        working-directory: ARC-AGI-3-Agents
+        run: |
+          python -m unittest discover -s tests -p "test_feedback_*.py" -v
+
+      - name: Commit verified changes only to V8.4 branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add \
+            ARC-AGI-3-Agents/agents/templates/feedback_explorer.py \
+            ARC-AGI-3-Agents/agents/templates/feedback_policy.py \
+            ARC-AGI-3-Agents/agents/templates/ls20_visual_planner.py \
+            ARC-AGI-3-Agents/tests/test_feedback_v8_4_visual_reverse.py
+          if git diff --cached --quiet; then
+            echo "No source changes to commit."
+          else
+            git commit -m "feat: FeedbackExplorer V8.4 visual route recovery [skip ci]"
+            git push origin HEAD:feat/feedback-explorer-v8-4-visual-route-recovery
+          fi
