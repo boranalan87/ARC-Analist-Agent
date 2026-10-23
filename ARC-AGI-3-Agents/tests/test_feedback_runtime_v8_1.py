@@ -225,7 +225,7 @@ class RuntimeProbeV83Tests(unittest.TestCase):
             and isinstance(node.value, ast.Constant)
         ]
 
-        self.assertEqual(versions, ["8.3"])
+        self.assertEqual(versions, ["8.4"])
 
     def test_runtime_version_and_probe_are_preserved(self):
         """Changing agent version must not alter API metadata."""
