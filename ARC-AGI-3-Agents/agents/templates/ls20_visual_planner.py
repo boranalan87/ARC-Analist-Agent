@@ -258,6 +258,10 @@ class LS20VisualPlanner:
         self.level2_aligned_goal_route_blocked = 0
         self.level2_alignment_lost = 0
         self._level2_was_aligned = False
+        # V8.7: bounded observational events; never used for actions.
+        self.level2_alignment_events = []
+        self._level2_observations = 0
+        self._level2_last_visible = None
         self._switch_plan = None  # (phase, exit_position, return_action, rotations_before)
         self._switch_previous_contact = False
         self._switch_retry_count = 0
@@ -278,6 +282,7 @@ class LS20VisualPlanner:
         self._switch_used_exits.clear()
         self._level2_landmark_validated = False
         self._level2_was_aligned = False
+        self._level2_last_visible = None
 
     def _switch_cycle_step(self, grid, player, switch, rotations, candidates):
         """Suggest an exit/return ONLY for verified visible LS20 level-2.
@@ -422,9 +427,34 @@ class LS20VisualPlanner:
             return self._fallback("pose_not_visible")
 
         if level == LS20_LEVEL_2_INDEX:
+            self._level2_observations += 1
+            previous = self._level2_last_visible
             if self._level2_was_aligned and turns != 0:
                 self.level2_alignment_lost += 1
+                if len(self.level2_alignment_events) < 16:
+                    self.level2_alignment_events.append({
+                        "event_index": self.level2_alignment_lost,
+                        "level2_observation": self._level2_observations,
+                        "previous_player": list(previous["player"]) if previous else None,
+                        "current_player": list(player),
+                        "switch": list(LEVEL_2_ROTATION_SWITCH),
+                        "previous_rotations": previous["rotations"] if previous else 0,
+                        "current_rotations": turns,
+                        "previous_proposed_action": previous.get("proposed_action") if previous else None,
+                        "previous_selected_action": previous.get("selected_action") if previous else None,
+                        "previous_planner_reason": previous.get("planner_reason") if previous else None,
+                        "previous_on_switch": previous["player"] == LEVEL_2_ROTATION_SWITCH if previous else None,
+                        "current_on_switch": player == LEVEL_2_ROTATION_SWITCH,
+                        "source": "visible_frame",
+                    })
             self._level2_was_aligned = turns == 0
+            self._level2_last_visible = {
+                "player": player,
+                "rotations": turns,
+                "planner_reason": None,
+                "proposed_action": None,
+                "selected_action": None,
+            }
 
         if turns:
             if rotation_tile is None:
@@ -497,6 +527,10 @@ class LS20VisualPlanner:
         reverse_override: bool = False,
     ) -> None:
         """Count choices actually selected; never claim a level was solved."""
+        if self._last_level == LS20_LEVEL_2_INDEX and self._level2_last_visible is not None:
+            self._level2_last_visible["proposed_action"] = proposal
+            self._level2_last_visible["selected_action"] = selected
+            self._level2_last_visible["planner_reason"] = self.last_reason
         if proposal is None:
             return
         if selected == proposal:
@@ -515,7 +549,7 @@ class LS20VisualPlanner:
 
         return None
 
-    def summary(self) -> dict[str, int | bool | str]:
+    def summary(self) -> dict[str, Any]:
         return {
             "enabled": True,
             "scope": "ls20_levels_1_and_validated_2_visible_frames",
@@ -537,5 +571,6 @@ class LS20VisualPlanner:
             "level2_aligned_safe_routes": self.level2_aligned_safe_routes,
             "level2_aligned_goal_route_blocked": self.level2_aligned_goal_route_blocked,
             "level2_alignment_lost": self.level2_alignment_lost,
+            "level2_alignment_events": list(self.level2_alignment_events),
             "last_reason": self.last_reason,
         }
