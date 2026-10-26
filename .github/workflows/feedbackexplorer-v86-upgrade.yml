@@ -1,0 +1,46 @@
+name: Verify isolated FeedbackExplorer V8.6 aligned-safe routing
+
+on:
+  push:
+    branches:
+      - 'feat/feedback-explorer-v8-6-aligned-safe-route'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apply-and-test:
+    if: github.ref == 'refs/heads/feat/feedback-explorer-v8-6-aligned-safe-route'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout V8.6 branch only
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+      - name: Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify safe patch applies to V8.5
+        run: python upgrade_v86.py --check
+      - name: Apply narrow V8.6 patch
+        run: python upgrade_v86.py --apply
+      - name: Compile changed Python source
+        run: python -m compileall -q ARC-AGI-3-Agents/agents/templates ARC-AGI-3-Agents/tests/test_feedback_v8_6_aligned_route.py
+      - name: Run all FeedbackExplorer regression tests
+        working-directory: ARC-AGI-3-Agents
+        run: python -m unittest discover -s tests -p 'test_feedback_*.py' -v
+      - name: Commit V8.6 only after tests pass
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add ARC-AGI-3-Agents/agents/templates/ls20_visual_planner.py \
+                  ARC-AGI-3-Agents/agents/templates/feedback_explorer.py \
+                  ARC-AGI-3-Agents/tests/test_feedback_v8_6_aligned_route.py
+          if git diff --cached --quiet; then
+            echo 'Already verified; no generated source changes.'
+          else
+            git commit -m 'feat: FeedbackExplorer V8.6 aligned safe goal route [skip ci]'
+            git push origin HEAD:'feat/feedback-explorer-v8-6-aligned-safe-route'
+          fi
