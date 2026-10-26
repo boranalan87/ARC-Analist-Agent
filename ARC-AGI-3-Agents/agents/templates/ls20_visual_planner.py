@@ -12,6 +12,7 @@ level completion, and a valid-looking path is not necessarily a winning path.
 
 from __future__ import annotations
 
+import hashlib
 from collections import deque
 from operator import index
 from typing import Any, Sequence
@@ -262,6 +263,10 @@ class LS20VisualPlanner:
         self.level2_alignment_events = []
         self._level2_observations = 0
         self._level2_last_visible = None
+        # V8.8: bounded observational evidence from immediate action frames.
+        self.level2_switch_exit_transitions = []
+        self.level2_switch_exit_transitions_total = 0
+        self.level2_switch_exit_transition_errors = 0
         self._switch_plan = None  # (phase, exit_position, return_action, rotations_before)
         self._switch_previous_contact = False
         self._switch_retry_count = 0
@@ -549,6 +554,78 @@ class LS20VisualPlanner:
 
         return None
 
+    def record_frame_transition(self, before, after, action_name, *, step_index):
+        """Record visible one-action switch exits without changing decisions.
+
+        A nominal 5px movement is only the planner-grid reference, NOT a
+        verified statement about how the game engine interprets a key press.
+        Frame fingerprints are bounded hashes, never hidden game state.
+        """
+        try:
+            if getattr(before, "levels_completed", None) != LS20_LEVEL_2_INDEX:
+                return
+            if action_name not in DIRECTIONS:
+                return
+            before_grid = visible_grid(getattr(before, "frame", None))
+            if before_grid is None:
+                return
+            before_player = locate_player(before_grid)
+            before_goal = locate_goal(before_grid)
+            if before_player != LEVEL_2_ROTATION_SWITCH or before_goal != LEVEL_2_GOAL:
+                return
+            before_turns = shape_rotations_needed(before_grid, before_goal)
+            if before_turns != 0:
+                return
+
+            self.level2_switch_exit_transitions_total += 1
+            if len(self.level2_switch_exit_transitions) >= 16:
+                return
+
+            after_grid = visible_grid(getattr(after, "frame", None))
+            after_player = locate_player(after_grid) if after_grid is not None else None
+            after_goal = locate_goal(after_grid) if after_grid is not None else None
+            after_turns = (
+                shape_rotations_needed(after_grid, after_goal)
+                if after_grid is not None and after_goal is not None else None
+            )
+            dx, dy = DIRECTIONS[action_name]
+            nominal_next = (before_player[0] + dx, before_player[1] + dy)
+            actual_delta = (
+                (after_player[0] - before_player[0],
+                 after_player[1] - before_player[1])
+                if after_player is not None else None
+            )
+            old_state = getattr(getattr(before, "state", None), "name", "UNKNOWN")
+            new_state = getattr(getattr(after, "state", None), "name", "UNKNOWN")
+            self.level2_switch_exit_transitions.append({
+                "step_index": step_index if isinstance(step_index, int) else None,
+                "selected_action": action_name,
+                "before_player": list(before_player),
+                "after_player": list(after_player) if after_player is not None else None,
+                "switch": list(LEVEL_2_ROTATION_SWITCH),
+                "nominal_delta": [dx, dy],
+                "nominal_next_player": list(nominal_next),
+                "observed_delta": list(actual_delta) if actual_delta is not None else None,
+                "nominal_step_match": after_player == nominal_next if after_player is not None else None,
+                "before_rotations": before_turns,
+                "after_rotations": after_turns,
+                "alignment_lost": after_turns is not None and after_turns != 0,
+                "before_level": before.levels_completed,
+                "after_level": getattr(after, "levels_completed", None),
+                "before_state": str(old_state)[:32],
+                "after_state": str(new_state)[:32],
+                "after_full_reset": getattr(after, "full_reset", None) is True,
+                "before_frame_fp": hashlib.sha256(bytes(p for row in before_grid for p in row)).hexdigest()[:16],
+                "after_frame_fp": (
+                    hashlib.sha256(bytes(p for row in after_grid for p in row)).hexdigest()[:16]
+                    if after_grid is not None else None
+                ),
+                "source": "visible_action_before_after",
+            })
+        except Exception:
+            # Diagnosing a bad frame can NEVER interfere with the game action.
+            self.level2_switch_exit_transition_errors += 1
+
     def summary(self) -> dict[str, Any]:
         return {
             "enabled": True,
@@ -572,5 +649,8 @@ class LS20VisualPlanner:
             "level2_aligned_goal_route_blocked": self.level2_aligned_goal_route_blocked,
             "level2_alignment_lost": self.level2_alignment_lost,
             "level2_alignment_events": list(self.level2_alignment_events),
+            "level2_switch_exit_transitions_total": self.level2_switch_exit_transitions_total,
+            "level2_switch_exit_transition_errors": self.level2_switch_exit_transition_errors,
+            "level2_switch_exit_transitions": list(self.level2_switch_exit_transitions),
             "last_reason": self.last_reason,
         }

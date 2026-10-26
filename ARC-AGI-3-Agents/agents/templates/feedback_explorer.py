@@ -1,6 +1,6 @@
 """Keyboard frame-aware ARC-AGI-3 exploration agent.
 
-FeedbackExplorer V8.7 diagnostics:
+FeedbackExplorer V8.8 action-transition diagnostics:
 - Preserve V3 balanced action exploration.
 - Preserve V4 LS20 action compatibility (ACTION1 through ACTION4).
 - Preserve V5 immediate reverse movement prevention for LS20.
@@ -26,7 +26,7 @@ from .ls20_level2_frame_capture import LS20Level2FrameCapture
 class FeedbackExplorer(Agent):
     """Explore keyboard games and record observed outcomes."""
 
-    AGENT_VERSION = "8.7"
+    AGENT_VERSION = "8.8"
 
     MAX_ACTIONS = 80
 
@@ -124,7 +124,7 @@ class FeedbackExplorer(Agent):
 
             action = GameAction.RESET
             action.reasoning = (
-                "FeedbackExplorer V8.7: start or restart game"
+                "FeedbackExplorer V8.8: start or restart game"
             )
             return action
 
@@ -199,7 +199,7 @@ class FeedbackExplorer(Agent):
 
         action = GameAction.from_name(action_name)
         action.reasoning = (
-            f"FeedbackExplorer V8.7: {action_name}; "
+            f"FeedbackExplorer V8.8: {action_name}; "
             f"state_visits={self.policy.visits[key]}; "
             f"trials={self.policy.attempts[(key, action_name)]}; "
             f"avoid_reverse={self.policy.avoid_immediate_reverse}; "
@@ -218,6 +218,12 @@ class FeedbackExplorer(Agent):
         after = super().take_action(action)
 
         if after is not None:
+            # V8.8 read-only action boundary: actual returned frame.
+            planner = self._ls20_visual_planner
+            if planner is not None:
+                observe = getattr(planner, "record_frame_transition", None)
+                if callable(observe):
+                    observe(before, after, action.name, step_index=self.action_counter + 1)
             self.diagnostics.record_action(
                 action=action.name,
                 before_frame=before.frame,
