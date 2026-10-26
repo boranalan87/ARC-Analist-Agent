@@ -182,6 +182,8 @@ def shortest_visible_path(
     goal: tuple[int, int],
     candidates: Sequence[str],
     blocked: set[tuple[tuple[int, int], str]],
+    *,
+    avoid_positions: set[tuple[int, int]] | None = None,
 ) -> list[str] | None:
     """Find a bounded route over visible 5x5 cells."""
     if start == goal:
@@ -202,6 +204,8 @@ def shortest_visible_path(
             next_pos = (pos[0] + dx, pos[1] + dy)
 
             if next_pos in seen:
+                continue
+            if avoid_positions is not None and next_pos in avoid_positions:
                 continue
             if not _passable(grid, *next_pos):
                 continue
@@ -249,6 +253,11 @@ class LS20VisualPlanner:
         self.level2_switch_cycles_stalled = 0
         self.level2_switch_retry_exhausted = 0
         self.level2_goal_routes_after_alignment = 0
+        # V8.6: planning measurements do not imply level completion.
+        self.level2_aligned_safe_routes = 0
+        self.level2_aligned_goal_route_blocked = 0
+        self.level2_alignment_lost = 0
+        self._level2_was_aligned = False
         self._switch_plan = None  # (phase, exit_position, return_action, rotations_before)
         self._switch_previous_contact = False
         self._switch_retry_count = 0
@@ -268,6 +277,7 @@ class LS20VisualPlanner:
         self._switch_retry_count = 0
         self._switch_used_exits.clear()
         self._level2_landmark_validated = False
+        self._level2_was_aligned = False
 
     def _switch_cycle_step(self, grid, player, switch, rotations, candidates):
         """Suggest an exit/return ONLY for verified visible LS20 level-2.
@@ -408,7 +418,13 @@ class LS20VisualPlanner:
 
         turns = shape_rotations_needed(grid, goal)
         if turns is None:
+            # Missing visual evidence must not count as alignment loss.
             return self._fallback("pose_not_visible")
+
+        if level == LS20_LEVEL_2_INDEX:
+            if self._level2_was_aligned and turns != 0:
+                self.level2_alignment_lost += 1
+            self._level2_was_aligned = turns == 0
 
         if turns:
             if rotation_tile is None:
@@ -441,16 +457,27 @@ class LS20VisualPlanner:
                 # Never mistake being on the switch for a successful route.
                 return self._fallback('switch_awaits_observed_rotation')
 
+        # Never intentionally route BACK onto the visible rotation
+        # switch once the rendered current shape matches the goal.
+        # Leaving the switch (when already standing on it) is allowed.
+        aligned_level2 = level == LS20_LEVEL_2_INDEX and turns == 0
         route = shortest_visible_path(
             grid,
             player,
             destination,
             candidates,
             self._blocked,
+            avoid_positions={LEVEL_2_ROTATION_SWITCH} if aligned_level2 else None,
         )
 
         if not route:
+            if aligned_level2:
+                self.level2_aligned_goal_route_blocked += 1
+                return self._fallback('aligned_safe_goal_route_not_visible')
             return self._fallback("no_visible_route")
+
+        if aligned_level2:
+            self.level2_aligned_safe_routes += 1
 
         action = route[0]
         self._pending = (player, action, level)
@@ -507,5 +534,8 @@ class LS20VisualPlanner:
             "level2_switch_cycles_stalled": self.level2_switch_cycles_stalled,
             "level2_switch_retry_exhausted": self.level2_switch_retry_exhausted,
             "level2_goal_routes_after_alignment": self.level2_goal_routes_after_alignment,
+            "level2_aligned_safe_routes": self.level2_aligned_safe_routes,
+            "level2_aligned_goal_route_blocked": self.level2_aligned_goal_route_blocked,
+            "level2_alignment_lost": self.level2_alignment_lost,
             "last_reason": self.last_reason,
         }
