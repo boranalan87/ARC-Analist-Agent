@@ -240,11 +240,110 @@ class LS20VisualPlanner:
         self.preferred_actions_applied = 0
         self.preferred_actions_rejected = 0
         self.level2_reverse_filter_overrides = 0
+        # V8.5: inspect switch contact and attempt at most three visible
+        # exit/re-entry cycles when the shape still requires rotation.
+        self.level2_switch_contacts = 0
+        self.level2_switch_exits_proposed = 0
+        self.level2_switch_returns_proposed = 0
+        self.level2_pose_changes_observed = 0
+        self.level2_switch_cycles_stalled = 0
+        self.level2_switch_retry_exhausted = 0
+        self.level2_goal_routes_after_alignment = 0
+        self._switch_plan = None  # (phase, exit_position, return_action, rotations_before)
+        self._switch_previous_contact = False
+        self._switch_retry_count = 0
+        self._switch_used_exits = set()
+        self._level2_landmark_validated = False
 
     def reset_pending(self) -> None:
         """Clear temporary movement information after a reset."""
         self._pending = None
         self._blocked.clear()
+        self._reset_switch_state()
+
+    def _reset_switch_state(self) -> None:
+        """Reset cycle state; run-level diagnostics remain cumulative."""
+        self._switch_plan = None
+        self._switch_previous_contact = False
+        self._switch_retry_count = 0
+        self._switch_used_exits.clear()
+        self._level2_landmark_validated = False
+
+    def _switch_cycle_step(self, grid, player, switch, rotations, candidates):
+        """Suggest an exit/return ONLY for verified visible LS20 level-2.
+
+        No assumed game rules: rotation is credited only if a later visible
+        frame changes the current-vs-target shape orientation. If this fails,
+        stop forcing the cycle after three unconfirmed attempts.
+        """
+        if player == switch and not self._switch_previous_contact:
+            self.level2_switch_contacts += 1
+        self._switch_previous_contact = player == switch
+
+        if self._switch_plan is not None:
+            phase, exit_pos, return_action, prior_rotations = self._switch_plan
+            if rotations != prior_rotations:
+                self.level2_pose_changes_observed += 1
+                self._switch_retry_count = 0
+                self._switch_used_exits.clear()
+                self._switch_plan = None
+                # If aligned, the caller will route toward the visible goal.
+                if rotations == 0:
+                    return None
+            elif phase == 'exit' and player == exit_pos:
+                # Exit was observed; try stepping back onto the visible switch.
+                dx, dy = DIRECTIONS[return_action]
+                if (player[0] + dx, player[1] + dy) == switch and _passable(grid, *switch):
+                    self._switch_plan = ('return', exit_pos, return_action, prior_rotations)
+                    self.level2_switch_returns_proposed += 1
+                    self.last_reason = 'switch_return_to_verify_pose'
+                    return return_action
+                self._switch_plan = None
+            elif phase == 'return' and player == switch:
+                # Re-entered with no observable pose change.
+                self.level2_switch_cycles_stalled += 1
+                self._switch_retry_count += 1
+                self._switch_plan = None
+            elif phase == 'exit' and player == switch:
+                # Exit was blocked or not executed; attempt another neighbor.
+                self._switch_plan = None
+            elif phase == 'return' and player == exit_pos:
+                # Re-attempt return while the frame and route remain valid.
+                dx, dy = DIRECTIONS[return_action]
+                if (player[0] + dx, player[1] + dy) == switch and _passable(grid, *switch):
+                    self.level2_switch_returns_proposed += 1
+                    self.last_reason = 'switch_return_retry'
+                    return return_action
+                self._switch_plan = None
+            else:
+                # Unexpected screen transition: do not hallucinate contact.
+                self._switch_plan = None
+
+        if rotations == 0 or player != switch:
+            return None
+        if self._switch_retry_count >= 3:
+            self.level2_switch_retry_exhausted += 1
+            self.last_reason = 'switch_cycles_unconfirmed'
+            return None
+
+        # A step off the switch followed by a step back is a controlled
+        # hypothesis, not a claim that this mechanic rotates the shape.
+        for action, (dx, dy) in DIRECTIONS.items():
+            if action not in candidates or action in self._switch_used_exits:
+                continue
+            exit_pos = (player[0] + dx, player[1] + dy)
+            return_action = next((a for a, (rx, ry) in DIRECTIONS.items()
+                                  if (rx, ry) == (-dx, -dy)), None)
+            if return_action not in candidates or not _passable(grid, *exit_pos):
+                continue
+            if (player, action) in self._blocked:
+                continue
+            self._switch_used_exits.add(action)
+            self._switch_plan = ('exit', exit_pos, return_action, rotations)
+            self.level2_switch_exits_proposed += 1
+            self.last_reason = 'switch_exit_to_retry_rotation'
+            return action
+        return None
 
     def propose(
         self,
@@ -258,6 +357,7 @@ class LS20VisualPlanner:
         ):
             self._blocked.clear()
             self._pending = None
+            self._reset_switch_state()
 
         self._last_level = level
 
@@ -282,12 +382,20 @@ class LS20VisualPlanner:
         if level == LS20_LEVEL_2_INDEX:
             rotation_tile = locate_rotation_switch(grid)
 
-            if (
-                goal != LEVEL_2_GOAL
-                or rotation_tile != LEVEL_2_ROTATION_SWITCH
-            ):
+            if goal != LEVEL_2_GOAL:
                 self._pending = None
                 return self._fallback("unvalidated_level")
+            if rotation_tile == LEVEL_2_ROTATION_SWITCH:
+                self._level2_landmark_validated = True
+            elif not (
+                self._level2_landmark_validated
+                and player == LEVEL_2_ROTATION_SWITCH
+            ):
+                # A player sprite may occlude the switch glyph. Only permit
+                # that exact occlusion AFTER prior visible-frame validation.
+                self._pending = None
+                return self._fallback("unvalidated_level")
+            rotation_tile = LEVEL_2_ROTATION_SWITCH
 
         if self._pending is not None:
             previous, action, previous_level = self._pending
@@ -316,6 +424,22 @@ class LS20VisualPlanner:
         else:
             destination = goal
             reason = "pose_matches_goal"
+            if level == LS20_LEVEL_2_INDEX and player != goal:
+                self.level2_goal_routes_after_alignment += 1
+
+        # V8.5 switch-cycle recovery is scoped to validated level-2 frames.
+        # A proposed cycle is a testable hypothesis, not a solved-game claim.
+        if level == LS20_LEVEL_2_INDEX:
+            cycle = self._switch_cycle_step(
+                grid, player, rotation_tile, turns, candidates
+            )
+            if cycle is not None:
+                self.proposals += 1
+                self.level2_proposals += 1
+                return cycle
+            if turns and player == rotation_tile:
+                # Never mistake being on the switch for a successful route.
+                return self._fallback('switch_awaits_observed_rotation')
 
         route = shortest_visible_path(
             grid,
@@ -376,5 +500,12 @@ class LS20VisualPlanner:
             "preferred_actions_applied": self.preferred_actions_applied,
             "preferred_actions_rejected": self.preferred_actions_rejected,
             "level2_reverse_filter_overrides": self.level2_reverse_filter_overrides,
+            "level2_switch_contacts": self.level2_switch_contacts,
+            "level2_switch_exits_proposed": self.level2_switch_exits_proposed,
+            "level2_switch_returns_proposed": self.level2_switch_returns_proposed,
+            "level2_pose_changes_observed": self.level2_pose_changes_observed,
+            "level2_switch_cycles_stalled": self.level2_switch_cycles_stalled,
+            "level2_switch_retry_exhausted": self.level2_switch_retry_exhausted,
+            "level2_goal_routes_after_alignment": self.level2_goal_routes_after_alignment,
             "last_reason": self.last_reason,
         }
