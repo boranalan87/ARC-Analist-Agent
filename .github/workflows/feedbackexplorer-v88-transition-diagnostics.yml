@@ -1,0 +1,47 @@
+name: Verify isolated FeedbackExplorer V8.8 action-boundary diagnostics
+
+on:
+  push:
+    branches:
+      - 'feat/feedback-explorer-v8-8-switch-transition-trace'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apply-and-test:
+    if: github.ref == 'refs/heads/feat/feedback-explorer-v8-8-switch-transition-trace'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout ONLY V8.8 feature branch
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+      - name: Use Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Fail-closed check V8.7 blobs and V8.8 anchors
+        run: python upgrade_v88.py --check
+      - name: Apply observational V8.8 patch
+        run: python upgrade_v88.py --apply
+      - name: Compile patched sources
+        run: python -m compileall -q ARC-AGI-3-Agents/agents/templates ARC-AGI-3-Agents/tests
+      - name: Run existing and new regression tests
+        working-directory: ARC-AGI-3-Agents
+        run: python -m unittest discover -s tests -p 'test_feedback_*.py' -v
+      - name: Commit V8.8 feature branch only if all tests pass
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add ARC-AGI-3-Agents/agents/templates/ls20_visual_planner.py \
+                  ARC-AGI-3-Agents/agents/templates/feedback_explorer.py \
+                  ARC-AGI-3-Agents/tests/test_feedback_runtime_v8_1.py \
+                  ARC-AGI-3-Agents/tests/test_feedback_v8_8_switch_transition.py
+          if git diff --cached --quiet; then
+            echo 'No changes; nothing to commit.'
+          else
+            git commit -m 'test: V8.8 read-only switch transition tracing [skip ci]'
+            git push origin HEAD:'feat/feedback-explorer-v8-8-switch-transition-trace'
+          fi
