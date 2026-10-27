@@ -23,6 +23,15 @@ LS20_LEVEL_2_INDEX = 1
 LEVEL_2_GOAL = (14, 40)
 LEVEL_2_ROTATION_SWITCH = (49, 45)
 
+# V8.8 genuine before-frame fingerprints in the 27 Oct read-only test.
+# These are observations of failed ACTION1 exits, NOT inferred game rules.
+# Match the entire displayed 64x64 frame, not merely player coordinates.
+V88_OBSERVED_RISKY_EXIT_FPS = frozenset({
+    'e58c8a39094e9e8f',  # alignment lost, observed -20,-5
+    '70c046c20de8d462',  # alignment lost, observed -20,-5
+    '869a0f09dcb2c63c',  # game over after nominal movement
+})
+
 DIRECTIONS = {
     "ACTION1": (0, -5),
     "ACTION2": (0, 5),
@@ -267,6 +276,14 @@ class LS20VisualPlanner:
         self.level2_switch_exit_transitions = []
         self.level2_switch_exit_transitions_total = 0
         self.level2_switch_exit_transition_errors = 0
+        # V8.9: specific real visible observations from V8.8, plus
+        # newly observed risks during THIS run. Persist during RESET
+        # inside a run so identical failures do not loop forever.
+        self._level2_risky_exits = {(fp, 'ACTION1') for fp in V88_OBSERVED_RISKY_EXIT_FPS}
+        self.level2_exit_guard_activations = 0
+        self.level2_exit_guard_alternatives = 0
+        self.level2_exit_guard_no_route = 0
+        self.level2_exit_guard_new_risks = 0
         self._switch_plan = None  # (phase, exit_position, return_action, rotations_before)
         self._switch_previous_contact = False
         self._switch_retry_count = 0
@@ -496,14 +513,49 @@ class LS20VisualPlanner:
         # switch once the rendered current shape matches the goal.
         # Leaving the switch (when already standing on it) is allowed.
         aligned_level2 = level == LS20_LEVEL_2_INDEX and turns == 0
+        # Guard only exact known visible level-2 frames: no coordinate-only
+        # assumptions, no hidden engine information, no other-game changes.
+        risky_actions = set()
+        guarded_blocked = self._blocked
+        if aligned_level2 and player == LEVEL_2_ROTATION_SWITCH:
+            fp = hashlib.sha256(bytes(v for row in grid for v in row)).hexdigest()[:16]
+            risky_actions = {
+                action for action in candidates
+                if (fp, action) in self._level2_risky_exits
+            }
+            if risky_actions:
+                self.level2_exit_guard_activations += 1
+                guarded_blocked = self._blocked | {(player, a) for a in risky_actions}
+
         route = shortest_visible_path(
             grid,
             player,
             destination,
             candidates,
-            self._blocked,
+            guarded_blocked,
             avoid_positions={LEVEL_2_ROTATION_SWITCH} if aligned_level2 else None,
         )
+        if not route and risky_actions:
+            self.level2_exit_guard_no_route += 1
+            # A visually passable NEW action is an experimental alternative,
+            # not a promise that the game engine will take a nominal step.
+            for candidate in DIRECTIONS:
+                if candidate not in candidates or candidate in risky_actions:
+                    continue
+                dx, dy = DIRECTIONS[candidate]
+                if (player, candidate) in self._blocked:
+                    continue
+                if not _passable(grid, player[0] + dx, player[1] + dy):
+                    continue
+                self._pending = (player, candidate, level)
+                self.last_reason = 'v89_observed_exit_risk_exploration'
+                self.level2_exit_guard_alternatives += 1
+                self.proposals += 1
+                self.level2_proposals += 1
+                return candidate
+            # No verified visible alternative: fail closed to old policy,
+            # and report that guarding did not guarantee a safe move.
+            return self._fallback('v89_risky_exit_no_visible_alternative')
 
         if not route:
             if aligned_level2:
@@ -515,6 +567,9 @@ class LS20VisualPlanner:
             self.level2_aligned_safe_routes += 1
 
         action = route[0]
+        if risky_actions and action not in risky_actions:
+            self.level2_exit_guard_alternatives += 1
+            reason = 'v89_observed_exit_risk_safe_route'
         self._pending = (player, action, level)
         self.last_reason = reason
         self.proposals += 1
@@ -597,6 +652,7 @@ class LS20VisualPlanner:
             )
             old_state = getattr(getattr(before, "state", None), "name", "UNKNOWN")
             new_state = getattr(getattr(after, "state", None), "name", "UNKNOWN")
+            before_fp = hashlib.sha256(bytes(p for row in before_grid for p in row)).hexdigest()[:16]
             self.level2_switch_exit_transitions.append({
                 "step_index": step_index if isinstance(step_index, int) else None,
                 "selected_action": action_name,
@@ -615,13 +671,20 @@ class LS20VisualPlanner:
                 "before_state": str(old_state)[:32],
                 "after_state": str(new_state)[:32],
                 "after_full_reset": getattr(after, "full_reset", None) is True,
-                "before_frame_fp": hashlib.sha256(bytes(p for row in before_grid for p in row)).hexdigest()[:16],
+                "before_frame_fp": before_fp,
                 "after_frame_fp": (
                     hashlib.sha256(bytes(p for row in after_grid for p in row)).hexdigest()[:16]
                     if after_grid is not None else None
                 ),
                 "source": "visible_action_before_after",
             })
+            # Only failed real after-frames justify a run-local risk mark.
+            if (getattr(after, 'levels_completed', None) == LS20_LEVEL_2_INDEX
+                    and (new_state == 'GAME_OVER' or (after_turns is not None and after_turns != 0))
+                    and len(self._level2_risky_exits) < 64):
+                old_size = len(self._level2_risky_exits)
+                self._level2_risky_exits.add((before_fp, action_name))
+                self.level2_exit_guard_new_risks += len(self._level2_risky_exits) - old_size
         except Exception:
             # Diagnosing a bad frame can NEVER interfere with the game action.
             self.level2_switch_exit_transition_errors += 1
@@ -652,5 +715,9 @@ class LS20VisualPlanner:
             "level2_switch_exit_transitions_total": self.level2_switch_exit_transitions_total,
             "level2_switch_exit_transition_errors": self.level2_switch_exit_transition_errors,
             "level2_switch_exit_transitions": list(self.level2_switch_exit_transitions),
+            "level2_exit_guard_activations": self.level2_exit_guard_activations,
+            "level2_exit_guard_alternatives": self.level2_exit_guard_alternatives,
+            "level2_exit_guard_no_route": self.level2_exit_guard_no_route,
+            "level2_exit_guard_new_risks": self.level2_exit_guard_new_risks,
             "last_reason": self.last_reason,
         }
