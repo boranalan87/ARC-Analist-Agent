@@ -1,0 +1,48 @@
+name: Verify isolated FeedbackExplorer V9.0 observed transition learning
+
+on:
+  push:
+    branches:
+      - 'feat/feedback-explorer-v9-0-transition-learning'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-test:
+    if: github.ref == 'refs/heads/feat/feedback-explorer-v9-0-transition-learning'
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Checkout V9.0 branch only
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+      - name: Install Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Validate V8.9 baseline blobs and exclusive feature branch
+        run: python upgrade_v90.py --check
+      - name: Apply bounded observed-transition experiment
+        run: python upgrade_v90.py --apply
+      - name: Compile real Python templates and tests
+        run: python -m compileall -q ARC-AGI-3-Agents/agents/templates ARC-AGI-3-Agents/tests
+      - name: Run complete regression tests (no ARC game access)
+        working-directory: ARC-AGI-3-Agents
+        run: python -m unittest discover -s tests -p 'test_feedback_*.py' -v
+      - name: Commit tested patch only on V9.0 feature branch
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add ARC-AGI-3-Agents/agents/templates/ls20_visual_planner.py \
+                  ARC-AGI-3-Agents/agents/templates/feedback_explorer.py \
+                  ARC-AGI-3-Agents/tests/test_feedback_runtime_v8_1.py \
+                  ARC-AGI-3-Agents/tests/test_feedback_v9_0_transition_learning.py
+          if git diff --cached --quiet; then
+            echo 'Nothing to commit.'
+          else
+            git commit -m 'feat: V9.0 observed transition learning [skip ci]'
+            git push origin HEAD:'feat/feedback-explorer-v9-0-transition-learning'
+          fi
