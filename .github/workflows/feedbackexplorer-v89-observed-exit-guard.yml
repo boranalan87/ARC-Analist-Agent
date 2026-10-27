@@ -1,0 +1,47 @@
+name: Verify isolated FeedbackExplorer V8.9 observed switch exit guard
+
+on:
+  push:
+    branches:
+      - 'feat/feedback-explorer-v8-9-observed-exit-guard'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apply-and-test:
+    if: github.ref == 'refs/heads/feat/feedback-explorer-v8-9-observed-exit-guard'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout ONLY V8.9 feature branch
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+      - name: Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify exact V8.8 code and target branch before any modification
+        run: python upgrade_v89.py --check
+      - name: Apply isolated observed-frame V8.9 experiment
+        run: python upgrade_v89.py --apply
+      - name: Compile Python templates and tests
+        run: python -m compileall -q ARC-AGI-3-Agents/agents/templates ARC-AGI-3-Agents/tests
+      - name: Run old and new regression tests (NO ARC game execution)
+        working-directory: ARC-AGI-3-Agents
+        run: python -m unittest discover -s tests -p 'test_feedback_*.py' -v
+      - name: Commit tested V8.9 patch to feature branch ONLY
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add ARC-AGI-3-Agents/agents/templates/ls20_visual_planner.py \
+                  ARC-AGI-3-Agents/agents/templates/feedback_explorer.py \
+                  ARC-AGI-3-Agents/tests/test_feedback_runtime_v8_1.py \
+                  ARC-AGI-3-Agents/tests/test_feedback_v8_9_exit_guard.py
+          if git diff --cached --quiet; then
+            echo 'Nothing to commit.'
+          else
+            git commit -m 'feat: V8.9 observed switch-exit guard [skip ci]'
+            git push origin HEAD:'feat/feedback-explorer-v8-9-observed-exit-guard'
+          fi
