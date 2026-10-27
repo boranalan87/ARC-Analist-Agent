@@ -32,6 +32,15 @@ V88_OBSERVED_RISKY_EXIT_FPS = frozenset({
     '869a0f09dcb2c63c',  # game over after nominal movement
 })
 
+# V9.0: only observations from the confirmed 27 Oct V8.8/V8.9 tests.
+# All four exits from the first hash yielded a loss of alignment;
+# others have untried choices. We DO NOT infer hidden game rules.
+V90_FAILED_EXIT_ACTIONS = {
+    'e58c8a39094e9e8f': frozenset(('ACTION1', 'ACTION2', 'ACTION3', 'ACTION4')),
+    '70c046c20de8d462': frozenset(('ACTION1', 'ACTION3', 'ACTION4')),
+    '869a0f09dcb2c63c': frozenset(('ACTION1', 'ACTION3', 'ACTION4')),
+}
+
 DIRECTIONS = {
     "ACTION1": (0, -5),
     "ACTION2": (0, 5),
@@ -284,6 +293,22 @@ class LS20VisualPlanner:
         self.level2_exit_guard_alternatives = 0
         self.level2_exit_guard_no_route = 0
         self.level2_exit_guard_new_risks = 0
+        # V9.0: bounded run-local state-action -> observed-successor model.
+        # Retain across in-run RESETs, never across unrelated agent runs.
+        self._v90_transitions = {}  # (frame_fp, action) -> aggregate
+        self._v90_max_pairs = 192
+        self.v90_request_reset = False
+        self.level2_transition_samples = 0
+        self.level2_transition_hazard_samples = 0
+        self.level2_transition_self_loops = 0
+        self.level2_transition_memory_full = 0
+        self.level2_transition_errors = 0
+        self.level2_transition_trap_avoids = 0
+        self.level2_transition_loop_avoids = 0
+        self.level2_transition_guarded_choices = 0
+        self.level2_transition_forced_resets = 0
+        for _fp, _actions in V90_FAILED_EXIT_ACTIONS.items():
+            self._level2_risky_exits.update((_fp, _action) for _action in _actions)
         self._switch_plan = None  # (phase, exit_position, return_action, rotations_before)
         self._switch_previous_contact = False
         self._switch_retry_count = 0
@@ -305,6 +330,79 @@ class LS20VisualPlanner:
         self._level2_landmark_validated = False
         self._level2_was_aligned = False
         self._level2_last_visible = None
+
+    def _v90_transition_avoid_actions(self, frame_fp, candidates):
+        """Reject confirmed bad immediate transitions, not guessed future moves."""
+        excluded = set()
+        self._v90_current_traps = 0
+        self._v90_current_loops = 0
+        for action in candidates:
+            sample = self._v90_transitions.get((frame_fp, action))
+            if not sample:
+                continue
+            # An observed next frame can be a fully known dead-end;
+            # avoid that approach BEFORE returning to the switch.
+            next_fp = sample['after_fp']
+            fully_bad = bool(next_fp) and all(
+                (next_fp, key) in self._level2_risky_exits for key in DIRECTIONS
+            )
+            repeated_self_loop = sample['self_loops'] >= 2
+            if sample['hazards'] or fully_bad or repeated_self_loop:
+                excluded.add(action)
+                if fully_bad:
+                    self._v90_current_traps += 1
+                if repeated_self_loop:
+                    self._v90_current_loops += 1
+        return excluded
+
+    def _record_v90_transition(self, before, after, action_name):
+        """Learn only from one actual LS20 level-2 action and visible frames."""
+        if getattr(before, 'levels_completed', None) != LS20_LEVEL_2_INDEX:
+            return
+        if action_name not in DIRECTIONS:
+            return
+        before_grid = visible_grid(getattr(before, 'frame', None))
+        if before_grid is None or locate_goal(before_grid) != LEVEL_2_GOAL:
+            return
+        before_pos = locate_player(before_grid)
+        before_turns = shape_rotations_needed(before_grid, LEVEL_2_GOAL)
+        visible_switch = locate_rotation_switch(before_grid) == LEVEL_2_ROTATION_SWITCH
+        if (before_pos is None or before_turns is None or not (
+                visible_switch or self._level2_landmark_validated)):
+            return
+        after_grid = visible_grid(getattr(after, 'frame', None))
+        if after_grid is None:
+            return
+        before_fp = hashlib.sha256(bytes(z for row in before_grid for z in row)).hexdigest()[:16]
+        after_fp = hashlib.sha256(bytes(z for row in after_grid for z in row)).hexdigest()[:16]
+        key = (before_fp, action_name)
+        sample = self._v90_transitions.get(key)
+        if sample is None:
+            if len(self._v90_transitions) >= self._v90_max_pairs:
+                self.level2_transition_memory_full += 1
+                return
+            sample = {'attempts': 0, 'hazards': 0, 'self_loops': 0, 'after_fp': None}
+            self._v90_transitions[key] = sample
+        # Store the last *observed* successor. No invented map transitions.
+        sample['attempts'] += 1
+        sample['after_fp'] = after_fp
+        sample['self_loops'] += int(after_fp == before_fp)
+        self.level2_transition_self_loops += int(after_fp == before_fp)
+        next_level = getattr(after, 'levels_completed', None)
+        new_state = getattr(getattr(after, 'state', None), 'name', 'UNKNOWN')
+        after_turns = (
+            shape_rotations_needed(after_grid, LEVEL_2_GOAL)
+            if locate_goal(after_grid) == LEVEL_2_GOAL else None
+        )
+        # Mark a hazard ONLY if the outcome is explicitly witnessed.
+        hazard = (new_state == 'GAME_OVER') or (
+            next_level == LS20_LEVEL_2_INDEX and
+            before_turns == 0 and after_turns is not None and after_turns != 0
+        )
+        if hazard:
+            sample['hazards'] += 1
+            self.level2_transition_hazard_samples += 1
+        self.level2_transition_samples += 1
 
     def _switch_cycle_step(self, grid, player, switch, rotations, candidates):
         """Suggest an exit/return ONLY for verified visible LS20 level-2.
@@ -388,6 +486,7 @@ class LS20VisualPlanner:
         level: int,
         candidates: Sequence[str],
     ) -> str | None:
+        self.v90_request_reset = False
         if (
             self._last_level is not None
             and level != self._last_level
@@ -527,6 +626,30 @@ class LS20VisualPlanner:
                 self.level2_exit_guard_activations += 1
                 guarded_blocked = self._blocked | {(player, a) for a in risky_actions}
 
+        # Learn from real immediate outcomes. An observed successor that
+        # already has four failed switch exits is a trap to approach differently.
+        # This is an EXACT visible-frame match, never a coordinate heuristic.
+        if level == LS20_LEVEL_2_INDEX:
+            frame_fp = hashlib.sha256(bytes(z for row in grid for z in row)).hexdigest()[:16]
+            avoided = self._v90_transition_avoid_actions(frame_fp, candidates)
+            if aligned_level2 and player == LEVEL_2_ROTATION_SWITCH:
+                avoided.update(a for a in candidates if (frame_fp, a) in self._level2_risky_exits)
+            if avoided:
+                guarded_blocked = guarded_blocked | {(player, a) for a in avoided}
+                self.level2_transition_guarded_choices += 1
+                self.level2_transition_trap_avoids += self._v90_current_traps
+                self.level2_transition_loop_avoids += self._v90_current_loops
+            # Every visible move from this exact aligned switch frame has
+            # FAILED before. The default fallback might repeat a known
+            # dangerous action; ask the agent for an explicit bounded RESET.
+            if (aligned_level2 and player == LEVEL_2_ROTATION_SWITCH
+                    and candidates and all(
+                        (frame_fp, a) in self._level2_risky_exits for a in candidates
+                    )):
+                self.v90_request_reset = True
+                self.level2_transition_forced_resets += 1
+                return self._fallback('v90_all_switch_exits_observed_bad')
+
         route = shortest_visible_path(
             grid,
             player,
@@ -610,12 +733,17 @@ class LS20VisualPlanner:
         return None
 
     def record_frame_transition(self, before, after, action_name, *, step_index):
-        """Record visible one-action switch exits without changing decisions.
+        """Record switch exits and learn bounded observed level-2 transitions.
 
         A nominal 5px movement is only the planner-grid reference, NOT a
         verified statement about how the game engine interprets a key press.
         Frame fingerprints are bounded hashes, never hidden game state.
         """
+        try:
+            self._record_v90_transition(before, after, action_name)
+        except Exception:
+            # Never break an ARC action to collect telemetry.
+            self.level2_transition_errors += 1
         try:
             if getattr(before, "levels_completed", None) != LS20_LEVEL_2_INDEX:
                 return
@@ -719,5 +847,16 @@ class LS20VisualPlanner:
             "level2_exit_guard_alternatives": self.level2_exit_guard_alternatives,
             "level2_exit_guard_no_route": self.level2_exit_guard_no_route,
             "level2_exit_guard_new_risks": self.level2_exit_guard_new_risks,
+            # Aggregate counters ONLY: do not overflow 16KB ARCRun logs.
+            "level2_transition_samples": self.level2_transition_samples,
+            "level2_transition_distinct_pairs": len(self._v90_transitions),
+            "level2_transition_hazard_samples": self.level2_transition_hazard_samples,
+            "level2_transition_self_loops": self.level2_transition_self_loops,
+            "level2_transition_memory_full": self.level2_transition_memory_full,
+            "level2_transition_errors": self.level2_transition_errors,
+            "level2_transition_trap_avoids": self.level2_transition_trap_avoids,
+            "level2_transition_loop_avoids": self.level2_transition_loop_avoids,
+            "level2_transition_guarded_choices": self.level2_transition_guarded_choices,
+            "level2_transition_forced_resets": self.level2_transition_forced_resets,
             "last_reason": self.last_reason,
         }
