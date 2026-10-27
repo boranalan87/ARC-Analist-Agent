@@ -314,6 +314,15 @@ class LS20VisualPlanner:
         self._switch_retry_count = 0
         self._switch_used_exits = set()
         self._level2_landmark_validated = False
+        # V9.1: keep only bounded, in-run history of failed switch approaches.
+        # The waypoint set has at most four *visible* switch-adjacent tiles.
+        self._v91_dead_end_resets = 0
+        self._v91_waypoints_tried = set()
+        self._v91_approach_waypoint = None
+        self._v91_exhausted_reported_for = 0
+        self.level2_v91_alternative_steps = 0
+        self.level2_v91_approaches_selected = 0
+        self.level2_v91_approaches_exhausted = 0
 
     def reset_pending(self) -> None:
         """Clear temporary movement information after a reset."""
@@ -330,6 +339,7 @@ class LS20VisualPlanner:
         self._level2_landmark_validated = False
         self._level2_was_aligned = False
         self._level2_last_visible = None
+        self._v91_approach_waypoint = None
 
     def _v90_transition_avoid_actions(self, frame_fp, candidates):
         """Reject confirmed bad immediate transitions, not guessed future moves."""
@@ -403,6 +413,57 @@ class LS20VisualPlanner:
             sample['hazards'] += 1
             self.level2_transition_hazard_samples += 1
         self.level2_transition_samples += 1
+
+    def _v91_pre_switch_route(self, grid, player, switch, candidates, blocked):
+        """Trial a different visible approach AFTER an observed dead-end RESET.
+
+        Uses only validated current pixels and a bounded pathfinder. Never
+        chooses a historically dangerous switch EXIT and never assumes a tile
+        is safe merely because it is visibly passable. No persistent memory.
+        """
+        if self._v91_dead_end_resets == 0 or player == switch:
+            return None
+        if self._v91_approach_waypoint is None:
+            for _, (dx, dy) in DIRECTIONS.items():
+                waypoint = (switch[0] + dx, switch[1] + dy)
+                if waypoint in self._v91_waypoints_tried or not _passable(grid, *waypoint):
+                    continue
+                # The route to the approach point must NOT transit the switch.
+                path = shortest_visible_path(grid, player, waypoint, candidates,
+                                             blocked, avoid_positions={switch})
+                if path is None:
+                    continue
+                # Reaching an adjacent tile is a hypothesis, not a win.
+                self._v91_waypoints_tried.add(waypoint)
+                self._v91_approach_waypoint = waypoint
+                self.level2_v91_approaches_selected += 1
+                break
+        waypoint = self._v91_approach_waypoint
+        if waypoint is None:
+            if self._v91_exhausted_reported_for != self._v91_dead_end_resets:
+                self._v91_exhausted_reported_for = self._v91_dead_end_resets
+                self.level2_v91_approaches_exhausted += 1
+            return None
+        if player == waypoint:
+            move = next((name for name, (dx, dy) in DIRECTIONS.items()
+                         if (player[0] + dx, player[1] + dy) == switch), None)
+            if move not in candidates or (player, move) in blocked or not _passable(grid, *switch):
+                self._v91_approach_waypoint = None
+                return None
+            self._v91_approach_waypoint = None
+        else:
+            path = shortest_visible_path(grid, player, waypoint, candidates,
+                                         blocked, avoid_positions={switch})
+            if not path:
+                self._v91_approach_waypoint = None
+                return None
+            move = path[0]
+        self._pending = (player, move, LS20_LEVEL_2_INDEX)
+        self.last_reason = 'v91_observed_dead_end_alternate_approach'
+        self.level2_v91_alternative_steps += 1
+        self.proposals += 1
+        self.level2_proposals += 1
+        return move
 
     def _switch_cycle_step(self, grid, player, switch, rotations, candidates):
         """Suggest an exit/return ONLY for verified visible LS20 level-2.
@@ -648,7 +709,18 @@ class LS20VisualPlanner:
                     )):
                 self.v90_request_reset = True
                 self.level2_transition_forced_resets += 1
+                self._v91_dead_end_resets += 1
                 return self._fallback('v90_all_switch_exits_observed_bad')
+
+        # Only after a confirmed dead-end RESET, attempt a different
+        # approach to the visible rotation switch, never an untested exit.
+        # This is conditional on the same validated level-2 frame gate.
+        if level == LS20_LEVEL_2_INDEX and turns and player != rotation_tile:
+            alternate = self._v91_pre_switch_route(
+                grid, player, rotation_tile, candidates, guarded_blocked
+            )
+            if alternate is not None:
+                return alternate
 
         route = shortest_visible_path(
             grid,
@@ -858,5 +930,10 @@ class LS20VisualPlanner:
             "level2_transition_loop_avoids": self.level2_transition_loop_avoids,
             "level2_transition_guarded_choices": self.level2_transition_guarded_choices,
             "level2_transition_forced_resets": self.level2_transition_forced_resets,
+            "level2_v91_dead_end_resets": self._v91_dead_end_resets,
+            "level2_v91_alternative_steps": self.level2_v91_alternative_steps,
+            "level2_v91_approaches_selected": self.level2_v91_approaches_selected,
+            "level2_v91_approaches_exhausted": self.level2_v91_approaches_exhausted,
+            "level2_v91_distinct_waypoints": len(self._v91_waypoints_tried),
             "last_reason": self.last_reason,
         }

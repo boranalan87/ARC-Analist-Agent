@@ -26,7 +26,7 @@ from .ls20_level2_frame_capture import LS20Level2FrameCapture
 class FeedbackExplorer(Agent):
     """Explore keyboard games and record observed outcomes."""
 
-    AGENT_VERSION = "9.0"
+    AGENT_VERSION = "9.1"
 
     MAX_ACTIONS = 80
 
@@ -124,7 +124,7 @@ class FeedbackExplorer(Agent):
 
             action = GameAction.RESET
             action.reasoning = (
-                "FeedbackExplorer V9.0: start or restart game"
+                "FeedbackExplorer V9.1: start or restart game"
             )
             return action
 
@@ -174,7 +174,7 @@ class FeedbackExplorer(Agent):
             self.policy.clear_pending()
             self._ls20_visual_planner.reset_pending()
             action = GameAction.RESET
-            action.reasoning = 'FeedbackExplorer V9.0: observed switch exit dead-end; reset to explore alternative approach'
+            action.reasoning = 'FeedbackExplorer V9.1: observed switch exit dead-end; reset to explore alternative approach'
             return action
 
         reverse_override = bool(
@@ -208,7 +208,7 @@ class FeedbackExplorer(Agent):
 
         action = GameAction.from_name(action_name)
         action.reasoning = (
-            f"FeedbackExplorer V9.0: {action_name}; "
+            f"FeedbackExplorer V9.1: {action_name}; "
             f"state_visits={self.policy.visits[key]}; "
             f"trials={self.policy.attempts[(key, action_name)]}; "
             f"avoid_reverse={self.policy.avoid_immediate_reverse}; "
