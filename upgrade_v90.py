@@ -151,8 +151,6 @@ DIRECTIONS = {
         if hazard:
             sample['hazards'] += 1
             self.level2_transition_hazard_samples += 1
-            if before_pos == LEVEL_2_ROTATION_SWITCH and before_turns == 0:
-                self._level2_risky_exits.add(key)
         self.level2_transition_samples += 1
 
     def _switch_cycle_step(self, grid, player, switch, rotations, candidates):
