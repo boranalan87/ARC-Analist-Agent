@@ -323,6 +323,13 @@ class LS20VisualPlanner:
         self.level2_v91_alternative_steps = 0
         self.level2_v91_approaches_selected = 0
         self.level2_v91_approaches_exhausted = 0
+        # V9.2: infer an approach only from an actual before/after frame.
+        # This history lives within one run and contains at most 4 tiles.
+        self._v92_last_observed_entry = None  # (adjacent_tile, exact_switch_frame_fp)
+        self._v92_confirmed_dead_end_approaches = set()
+        self.level2_v92_observed_entries = 0
+        self.level2_v92_verified_bad_approaches = 0
+        self.level2_v92_approaches_skipped = 0
 
     def reset_pending(self) -> None:
         """Clear temporary movement information after a reset."""
@@ -340,6 +347,43 @@ class LS20VisualPlanner:
         self._level2_was_aligned = False
         self._level2_last_visible = None
         self._v91_approach_waypoint = None
+        self._v92_last_observed_entry = None
+
+    def _v92_observe_switch_entry(self, before, after, action_name):
+        """Retain an actual adjacent-to-switch entry, never a proposed move.
+
+        The full rendered destination fingerprint prevents incorrectly
+        associating an earlier entry with a different switch configuration.
+        """
+        if action_name not in DIRECTIONS:
+            return
+        if (getattr(before, 'levels_completed', None) != LS20_LEVEL_2_INDEX or
+                getattr(after, 'levels_completed', None) != LS20_LEVEL_2_INDEX):
+            return
+        if getattr(getattr(after, 'state', None), 'name', '') != 'NOT_FINISHED':
+            return
+        before_grid = visible_grid(getattr(before, 'frame', None))
+        after_grid = visible_grid(getattr(after, 'frame', None))
+        if before_grid is None or after_grid is None:
+            return
+        if (locate_goal(before_grid) != LEVEL_2_GOAL or
+                locate_goal(after_grid) != LEVEL_2_GOAL or
+                locate_rotation_switch(before_grid) != LEVEL_2_ROTATION_SWITCH):
+            return
+        start = locate_player(before_grid)
+        end = locate_player(after_grid)
+        if start is None or end != LEVEL_2_ROTATION_SWITCH:
+            return
+        dx, dy = DIRECTIONS[action_name]
+        if (start[0] + dx, start[1] + dy) != end:
+            return
+        if shape_rotations_needed(after_grid, LEVEL_2_GOAL) is None:
+            return
+        fingerprint = hashlib.sha256(
+            bytes(px for row in after_grid for px in row)
+        ).hexdigest()[:16]
+        self._v92_last_observed_entry = (start, fingerprint)
+        self.level2_v92_observed_entries += 1
 
     def _v90_transition_avoid_actions(self, frame_fp, candidates):
         """Reject confirmed bad immediate transitions, not guessed future moves."""
@@ -426,6 +470,9 @@ class LS20VisualPlanner:
         if self._v91_approach_waypoint is None:
             for _, (dx, dy) in DIRECTIONS.items():
                 waypoint = (switch[0] + dx, switch[1] + dy)
+                if waypoint in self._v92_confirmed_dead_end_approaches:
+                    self.level2_v92_approaches_skipped += 1
+                    continue
                 if waypoint in self._v91_waypoints_tried or not _passable(grid, *waypoint):
                     continue
                 # The route to the approach point must NOT transit the switch.
@@ -710,6 +757,14 @@ class LS20VisualPlanner:
                 self.v90_request_reset = True
                 self.level2_transition_forced_resets += 1
                 self._v91_dead_end_resets += 1
+                # Only a real, matching inbound transition can disqualify
+                # this approach; neither coordinates nor a route guess suffice.
+                entry = self._v92_last_observed_entry
+                if entry is not None and entry[1] == frame_fp:
+                    was_new = entry[0] not in self._v92_confirmed_dead_end_approaches
+                    self._v92_confirmed_dead_end_approaches.add(entry[0])
+                    self.level2_v92_verified_bad_approaches += int(was_new)
+                    self._v92_last_observed_entry = None
                 return self._fallback('v90_all_switch_exits_observed_bad')
 
         # Only after a confirmed dead-end RESET, attempt a different
@@ -811,6 +866,11 @@ class LS20VisualPlanner:
         verified statement about how the game engine interprets a key press.
         Frame fingerprints are bounded hashes, never hidden game state.
         """
+        try:
+            self._v92_observe_switch_entry(before, after, action_name)
+        except Exception:
+            # Telemetry must never fail or change a game action.
+            pass
         try:
             self._record_v90_transition(before, after, action_name)
         except Exception:
@@ -935,5 +995,8 @@ class LS20VisualPlanner:
             "level2_v91_approaches_selected": self.level2_v91_approaches_selected,
             "level2_v91_approaches_exhausted": self.level2_v91_approaches_exhausted,
             "level2_v91_distinct_waypoints": len(self._v91_waypoints_tried),
+            "level2_v92_observed_entries": self.level2_v92_observed_entries,
+            "level2_v92_verified_bad_approaches": self.level2_v92_verified_bad_approaches,
+            "level2_v92_approaches_skipped": self.level2_v92_approaches_skipped,
             "last_reason": self.last_reason,
         }
