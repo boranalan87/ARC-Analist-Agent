@@ -366,6 +366,13 @@ class LS20VisualPlanner:
         # V9.5: strictly read-only, bounded no-detour diagnostics.
         self.level2_v95_no_alternative_events_total = 0
         self._v95_no_alternative_events = []  # at most 8
+        # Stage 2: evidence is from consecutive observed transitions,
+        # not repeat calls to propose() on the same frame.
+        self._v95_confirmed_short_cycles_by_fp = {}  # max 8
+        self._v95_recovery_attempted_fps = set()  # max 2
+        self.level2_v95_recovery_resets = 0
+        self.level2_v95_recovery_no_waypoint = 0
+        self.level2_v95_recovery_repeat_suppressed = 0
 
     def reset_pending(self) -> None:
         """Clear temporary movement information after a reset."""
@@ -436,6 +443,8 @@ class LS20VisualPlanner:
             if after_level != LS20_LEVEL_2_INDEX:
                 self._v93_repeated_actions.clear()
                 self._v94_short_guard_pairs.clear()
+                # A new level needs fresh observed cycle evidence.
+                self._v95_confirmed_short_cycles_by_fp.clear()
             return
         if (action_name not in DIRECTIONS and action_name != 'RESET') or (
             getattr(getattr(before, 'state', None), 'name', '') != 'NOT_FINISHED' or
@@ -513,9 +522,56 @@ class LS20VisualPlanner:
         # Never block an unobserved next action; require that the first
         # key was actually taken from the exact displayed state A.
         pair = (a, forward)
+        # Count independent real 4-step observations per exact masked
+        # visible state; a repeated propose() cannot increment this.
+        counts = self._v95_confirmed_short_cycles_by_fp
+        if a in counts or len(counts) < 8:
+            counts[a] = min(3, counts.get(a, 0) + 1)
         if pair not in self._v94_short_guard_pairs and len(self._v94_short_guard_pairs) < 8:
             self._v94_short_guard_pairs.add(pair)
             self.level2_v94_unique_pairs_blocked += 1
+
+    def _v95_try_recovery_reset(self, grid, player, switch, masked_fp, candidates):
+        """Bounded RESET only after repeated, *observed* 2-step loops.
+
+        A reset merely starts a new experimental approach through V9.1's
+        existing visible waypoint planner. We require a reachable, as-yet
+        untried switch-adjacent tile. This does not prove that tile is safe,
+        or that resetting/proposing a route will complete the level.
+        """
+        if self._v95_confirmed_short_cycles_by_fp.get(masked_fp, 0) < 2:
+            return False
+        if (masked_fp in self._v95_recovery_attempted_fps or
+                self.level2_v95_recovery_resets >= 2):
+            self.level2_v95_recovery_repeat_suppressed += 1
+            return False
+        # RESET clears only temporary _blocked observations, so use that
+        # post-reset condition for route availability. The visible switch
+        # cannot be crossed on the way to a distinct approach waypoint.
+        waypoint_exists = False
+        for dx, dy in DIRECTIONS.values():
+            waypoint = (switch[0] + dx, switch[1] + dy)
+            if (waypoint == player or
+                    waypoint in self._v91_waypoints_tried or
+                    waypoint in self._v92_confirmed_dead_end_approaches or
+                    not _passable(grid, *waypoint)):
+                continue
+            path = shortest_visible_path(
+                grid, player, waypoint, candidates, set(),
+                avoid_positions={switch},
+            )
+            if path:
+                waypoint_exists = True
+                break
+        if not waypoint_exists:
+            self.level2_v95_recovery_no_waypoint += 1
+            return False
+        self._v95_recovery_attempted_fps.add(masked_fp)
+        self.level2_v95_recovery_resets += 1
+        # Trigger V9.1's existing alternative-approach policy on next entry.
+        self._v91_dead_end_resets += 1
+        self.v90_request_reset = True
+        return True
 
     def _v90_transition_avoid_actions(self, frame_fp, candidates):
         """Reject confirmed bad immediate transitions, not guessed future moves."""
@@ -921,6 +977,11 @@ class LS20VisualPlanner:
                                 "source": "validated_visible_level2",
                             })
                     self.level2_v93_no_alternative += 1
+                    if (short_repeated and self._v95_try_recovery_reset(
+                            grid, player, rotation_tile,
+                            _v93_visible_state_fp(grid), candidates)):
+                        return self._fallback(
+                            "v95_observed_short_cycle_no_route_recovery")
             if aligned_level2 and player == LEVEL_2_ROTATION_SWITCH:
                 avoided.update(a for a in candidates if (frame_fp, a) in self._level2_risky_exits)
             if avoided:
@@ -1227,5 +1288,8 @@ class LS20VisualPlanner:
             "level2_v94_observation_errors": self.level2_v94_observation_errors,
             "level2_v95_no_alternative_events_total": self.level2_v95_no_alternative_events_total,
             "level2_v95_no_alternative_events": list(self._v95_no_alternative_events),
+            "level2_v95_recovery_resets": self.level2_v95_recovery_resets,
+            "level2_v95_recovery_no_waypoint": self.level2_v95_recovery_no_waypoint,
+            "level2_v95_recovery_repeat_suppressed": self.level2_v95_recovery_repeat_suppressed,
             "last_reason": self.last_reason,
         }

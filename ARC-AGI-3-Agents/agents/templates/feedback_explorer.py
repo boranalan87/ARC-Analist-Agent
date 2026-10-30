@@ -174,7 +174,14 @@ class FeedbackExplorer(Agent):
             self.policy.clear_pending()
             self._ls20_visual_planner.reset_pending()
             action = GameAction.RESET
-            action.reasoning = 'FeedbackExplorer V9.4: observed switch exit dead-end; reset to explore alternative approach'
+            action.reasoning = (
+                'FeedbackExplorer V9.5: observed level-2 short cycle; '
+                'bounded reset for an untried visible switch approach'
+                if getattr(self._ls20_visual_planner, 'last_reason', '') ==
+                    'v95_observed_short_cycle_no_route_recovery'
+                else 'FeedbackExplorer V9.4: observed switch exit dead-end; '
+                     'reset to explore alternative approach'
+            )
             return action
 
         reverse_override = bool(
