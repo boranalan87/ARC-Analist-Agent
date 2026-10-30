@@ -363,6 +363,9 @@ class LS20VisualPlanner:
         self.level2_v94_detours_selected = 0
         self.level2_v94_no_alternative = 0
         self.level2_v94_observation_errors = 0
+        # V9.5: strictly read-only, bounded no-detour diagnostics.
+        self.level2_v95_no_alternative_events_total = 0
+        self._v95_no_alternative_events = []  # at most 8
 
     def reset_pending(self) -> None:
         """Clear temporary movement information after a reset."""
@@ -900,6 +903,23 @@ class LS20VisualPlanner:
                 elif repeated:
                     if short_repeated:
                         self.level2_v94_no_alternative += 1
+                        # Diagnosing a short-cycle dead end never changes
+                        # the candidate list or the chosen action.
+                        self.level2_v95_no_alternative_events_total += 1
+                        if len(self._v95_no_alternative_events) < 8:
+                            passable = sorted(a for a in candidates
+                                if a in DIRECTIONS and _passable(
+                                    grid, player[0] + DIRECTIONS[a][0],
+                                    player[1] + DIRECTIONS[a][1]))
+                            self._v95_no_alternative_events.append({
+                                "frame_fp": _v93_visible_state_fp(grid),
+                                "player": list(player),
+                                "repeated_actions": sorted(repeated),
+                                "passable_actions": passable,
+                                "blocked_actions": sorted(a for a in passable
+                                    if (player, a) in guarded_blocked),
+                                "source": "validated_visible_level2",
+                            })
                     self.level2_v93_no_alternative += 1
             if aligned_level2 and player == LEVEL_2_ROTATION_SWITCH:
                 avoided.update(a for a in candidates if (frame_fp, a) in self._level2_risky_exits)
@@ -1205,5 +1225,7 @@ class LS20VisualPlanner:
             "level2_v94_detours_selected": self.level2_v94_detours_selected,
             "level2_v94_no_alternative": self.level2_v94_no_alternative,
             "level2_v94_observation_errors": self.level2_v94_observation_errors,
+            "level2_v95_no_alternative_events_total": self.level2_v95_no_alternative_events_total,
+            "level2_v95_no_alternative_events": list(self._v95_no_alternative_events),
             "last_reason": self.last_reason,
         }
