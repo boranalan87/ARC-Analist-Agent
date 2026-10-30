@@ -1,6 +1,6 @@
 """Keyboard frame-aware ARC-AGI-3 exploration agent.
 
-FeedbackExplorer V9.0 observed transition learning and loop-avoidance experiment:
+FeedbackExplorer V9.3 observed-cycle interruption experiment:
 - Preserve V3 balanced action exploration.
 - Preserve V4 LS20 action compatibility (ACTION1 through ACTION4).
 - Preserve V5 immediate reverse movement prevention for LS20.
@@ -26,7 +26,7 @@ from .ls20_level2_frame_capture import LS20Level2FrameCapture
 class FeedbackExplorer(Agent):
     """Explore keyboard games and record observed outcomes."""
 
-    AGENT_VERSION = "9.2"
+    AGENT_VERSION = "9.3"
 
     MAX_ACTIONS = 80
 
@@ -124,7 +124,7 @@ class FeedbackExplorer(Agent):
 
             action = GameAction.RESET
             action.reasoning = (
-                "FeedbackExplorer V9.2: start or restart game"
+                "FeedbackExplorer V9.3: start or restart game"
             )
             return action
 
@@ -174,7 +174,7 @@ class FeedbackExplorer(Agent):
             self.policy.clear_pending()
             self._ls20_visual_planner.reset_pending()
             action = GameAction.RESET
-            action.reasoning = 'FeedbackExplorer V9.2: observed switch exit dead-end; reset to explore alternative approach'
+            action.reasoning = 'FeedbackExplorer V9.3: observed switch exit dead-end; reset to explore alternative approach'
             return action
 
         reverse_override = bool(
@@ -208,7 +208,7 @@ class FeedbackExplorer(Agent):
 
         action = GameAction.from_name(action_name)
         action.reasoning = (
-            f"FeedbackExplorer V9.2: {action_name}; "
+            f"FeedbackExplorer V9.3: {action_name}; "
             f"state_visits={self.policy.visits[key]}; "
             f"trials={self.policy.attempts[(key, action_name)]}; "
             f"avoid_reverse={self.policy.avoid_immediate_reverse}; "

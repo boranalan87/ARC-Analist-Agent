@@ -239,6 +239,19 @@ def shortest_visible_path(
     return None
 
 
+def _v93_visible_state_fp(grid):
+    """Hash only *rendered* LS20 pixels, masking the varying step HUD.
+
+    V6's already-observed step counter occupies rows 61-62, columns 13-55.
+    Without masking this strip, a repeated screen sequence appears different
+    on each lap, defeating loop detection. This is not hidden game state.
+    """
+    return hashlib.sha256(bytes(
+        0 if 61 <= y <= 62 and 13 <= x < 56 else pixel
+        for y, row in enumerate(grid) for x, pixel in enumerate(row)
+    )).hexdigest()[:16]
+
+
 class LS20VisualPlanner:
     """Conservative LS20 planning using visible game frames."""
 
@@ -330,6 +343,17 @@ class LS20VisualPlanner:
         self.level2_v92_observed_entries = 0
         self.level2_v92_verified_bad_approaches = 0
         self.level2_v92_approaches_skipped = 0
+        # V9.3: bounded, run-local history of ACTUALLY observed level-2
+        # before/action/after frames. Detect cycles, not repeated coordinates.
+        self._v93_recent_steps = deque(maxlen=48)
+        self._v93_repeated_actions = set()  # at most 8 exact (frame, action) keys
+        self.level2_v93_observed_steps = 0
+        self.level2_v93_cycles_confirmed = 0
+        self.level2_v93_unique_actions_blocked = 0
+        self.level2_v93_guard_activations = 0
+        self.level2_v93_detours_selected = 0
+        self.level2_v93_no_alternative = 0
+        self.level2_v93_observation_errors = 0
 
     def reset_pending(self) -> None:
         """Clear temporary movement information after a reset."""
@@ -384,6 +408,67 @@ class LS20VisualPlanner:
         ).hexdigest()[:16]
         self._v92_last_observed_entry = (start, fingerprint)
         self.level2_v92_observed_entries += 1
+
+    def _v93_observe_repeated_cycle(self, before, after, action_name):
+        """Detect a strictly repeated 8–24-step *observed* level-2 cycle.
+
+        Accept RESET only when both actual frames are still level 2. Stop
+        comparing across level changes, invalid images and game-over states.
+        Store bounded fingerprints, NEVER synthetic engine transitions or
+        hidden state. A repeated cycle is not proof of an unsafe action.
+        """
+        before_level = getattr(before, 'levels_completed', None)
+        after_level = getattr(after, 'levels_completed', None)
+        if before_level != LS20_LEVEL_2_INDEX or after_level != LS20_LEVEL_2_INDEX:
+            self._v93_recent_steps.clear()
+            if after_level != LS20_LEVEL_2_INDEX:
+                self._v93_repeated_actions.clear()
+            return
+        if (action_name not in DIRECTIONS and action_name != 'RESET') or (
+            getattr(getattr(before, 'state', None), 'name', '') != 'NOT_FINISHED' or
+            getattr(getattr(after, 'state', None), 'name', '') != 'NOT_FINISHED'
+        ):
+            self._v93_recent_steps.clear()
+            return
+        before_grid = visible_grid(getattr(before, 'frame', None))
+        after_grid = visible_grid(getattr(after, 'frame', None))
+        if (before_grid is None or after_grid is None or
+                locate_goal(before_grid) != LEVEL_2_GOAL or
+                locate_goal(after_grid) != LEVEL_2_GOAL or
+                locate_player(before_grid) is None or
+                locate_player(after_grid) is None or
+                shape_rotations_needed(before_grid, LEVEL_2_GOAL) is None or
+                shape_rotations_needed(after_grid, LEVEL_2_GOAL) is None):
+            self._v93_recent_steps.clear()
+            return
+        before_fp = _v93_visible_state_fp(before_grid)
+        after_fp = _v93_visible_state_fp(after_grid)
+        # Require exact continuous observations; no stitching unrelated runs.
+        if self._v93_recent_steps and self._v93_recent_steps[-1][2] != before_fp:
+            self._v93_recent_steps.clear()
+        self._v93_recent_steps.append((before_fp, action_name, after_fp))
+        self.level2_v93_observed_steps += 1
+        steps = list(self._v93_recent_steps)
+        # Compare adjacent equally long *complete* sequences. A one-off
+        # self-loop or shared tile can never establish this threshold.
+        for period in range(8, min(24, len(steps) // 2) + 1):
+            previous, recent = steps[-2 * period:-period], steps[-period:]
+            if previous != recent:
+                continue
+            self.level2_v93_cycles_confirmed += 1
+            # A witnessed cycle predicts the action already executed when
+            # this exact displayed frame occurred in the matched sequence.
+            # Ambiguous actions at the frame remain unmodified.
+            next_actions = {
+                action for fp, action, _ in recent
+                if fp == after_fp and action in DIRECTIONS
+            }
+            if len(next_actions) == 1 and len(self._v93_repeated_actions) < 8:
+                key = (after_fp, next(iter(next_actions)))
+                if key not in self._v93_repeated_actions:
+                    self._v93_repeated_actions.add(key)
+                    self.level2_v93_unique_actions_blocked += 1
+            break
 
     def _v90_transition_avoid_actions(self, frame_fp, candidates):
         """Reject confirmed bad immediate transitions, not guessed future moves."""
@@ -724,6 +809,7 @@ class LS20VisualPlanner:
         # assumptions, no hidden engine information, no other-game changes.
         risky_actions = set()
         guarded_blocked = self._blocked
+        v93_avoided = set()
         if aligned_level2 and player == LEVEL_2_ROTATION_SWITCH:
             fp = hashlib.sha256(bytes(v for row in grid for v in row)).hexdigest()[:16]
             risky_actions = {
@@ -740,6 +826,27 @@ class LS20VisualPlanner:
         if level == LS20_LEVEL_2_INDEX:
             frame_fp = hashlib.sha256(bytes(z for row in grid for z in row)).hexdigest()[:16]
             avoided = self._v90_transition_avoid_actions(frame_fp, candidates)
+            # V9.3: only a twice-observed complete, progress-free cycle
+            # marks its EXACT next state/action for an experimental detour.
+            # Never override a visibly aligned goal route or force a move
+            # when there is no other visibly passable candidate.
+            if turns and player != rotation_tile:
+                repeated = {
+                    a for a in candidates
+                    if (_v93_visible_state_fp(grid), a) in self._v93_repeated_actions
+                }
+                viable_other = any(
+                    a not in repeated and (player, a) not in guarded_blocked
+                    and _passable(grid, player[0] + DIRECTIONS[a][0],
+                                  player[1] + DIRECTIONS[a][1])
+                    for a in candidates if a in DIRECTIONS
+                )
+                if repeated and viable_other:
+                    v93_avoided = repeated
+                    guarded_blocked = guarded_blocked | {(player, a) for a in repeated}
+                    self.level2_v93_guard_activations += 1
+                elif repeated:
+                    self.level2_v93_no_alternative += 1
             if aligned_level2 and player == LEVEL_2_ROTATION_SWITCH:
                 avoided.update(a for a in candidates if (frame_fp, a) in self._level2_risky_exits)
             if avoided:
@@ -775,6 +882,8 @@ class LS20VisualPlanner:
                 grid, player, rotation_tile, candidates, guarded_blocked
             )
             if alternate is not None:
+                if v93_avoided and alternate not in v93_avoided:
+                    self.level2_v93_detours_selected += 1
                 return alternate
 
         route = shortest_visible_path(
@@ -808,6 +917,23 @@ class LS20VisualPlanner:
             return self._fallback('v89_risky_exit_no_visible_alternative')
 
         if not route:
+            # Bounded experimental detour when the normal switch route is
+            # unavailable after excluding one twice-observed loop action.
+            # This is NOT a claim that the destination is safe or a win.
+            if v93_avoided and level == LS20_LEVEL_2_INDEX and turns:
+                for candidate in DIRECTIONS:
+                    if (candidate not in candidates or candidate in v93_avoided
+                            or (player, candidate) in guarded_blocked):
+                        continue
+                    dx, dy = DIRECTIONS[candidate]
+                    if not _passable(grid, player[0] + dx, player[1] + dy):
+                        continue
+                    self._pending = (player, candidate, level)
+                    self.last_reason = 'v93_observed_cycle_visible_detour'
+                    self.level2_v93_detours_selected += 1
+                    self.proposals += 1
+                    self.level2_proposals += 1
+                    return candidate
             if aligned_level2:
                 self.level2_aligned_goal_route_blocked += 1
                 return self._fallback('aligned_safe_goal_route_not_visible')
@@ -817,6 +943,9 @@ class LS20VisualPlanner:
             self.level2_aligned_safe_routes += 1
 
         action = route[0]
+        if v93_avoided and action not in v93_avoided:
+            self.level2_v93_detours_selected += 1
+            reason = 'v93_observed_cycle_route_detour'
         if risky_actions and action not in risky_actions:
             self.level2_exit_guard_alternatives += 1
             reason = 'v89_observed_exit_risk_safe_route'
@@ -866,6 +995,11 @@ class LS20VisualPlanner:
         verified statement about how the game engine interprets a key press.
         Frame fingerprints are bounded hashes, never hidden game state.
         """
+        try:
+            self._v93_observe_repeated_cycle(before, after, action_name)
+        except Exception:
+            # Observation failure cannot change agent actions.
+            self.level2_v93_observation_errors += 1
         try:
             self._v92_observe_switch_entry(before, after, action_name)
         except Exception:
@@ -998,5 +1132,12 @@ class LS20VisualPlanner:
             "level2_v92_observed_entries": self.level2_v92_observed_entries,
             "level2_v92_verified_bad_approaches": self.level2_v92_verified_bad_approaches,
             "level2_v92_approaches_skipped": self.level2_v92_approaches_skipped,
+            "level2_v93_observed_steps": self.level2_v93_observed_steps,
+            "level2_v93_cycles_confirmed": self.level2_v93_cycles_confirmed,
+            "level2_v93_unique_actions_blocked": self.level2_v93_unique_actions_blocked,
+            "level2_v93_guard_activations": self.level2_v93_guard_activations,
+            "level2_v93_detours_selected": self.level2_v93_detours_selected,
+            "level2_v93_no_alternative": self.level2_v93_no_alternative,
+            "level2_v93_observation_errors": self.level2_v93_observation_errors,
             "last_reason": self.last_reason,
         }
