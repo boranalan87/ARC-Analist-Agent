@@ -354,6 +354,15 @@ class LS20VisualPlanner:
         self.level2_v93_detours_selected = 0
         self.level2_v93_no_alternative = 0
         self.level2_v93_observation_errors = 0
+        # V9.4: two fully observed, consecutive, exact A->B->A
+        # oscillations. No inferred or position-only transitions.
+        self._v94_short_guard_pairs = set()  # max 8 masked-screen/action pairs
+        self.level2_v94_short_cycles_confirmed = 0
+        self.level2_v94_unique_pairs_blocked = 0
+        self.level2_v94_guard_activations = 0
+        self.level2_v94_detours_selected = 0
+        self.level2_v94_no_alternative = 0
+        self.level2_v94_observation_errors = 0
 
     def reset_pending(self) -> None:
         """Clear temporary movement information after a reset."""
@@ -423,6 +432,7 @@ class LS20VisualPlanner:
             self._v93_recent_steps.clear()
             if after_level != LS20_LEVEL_2_INDEX:
                 self._v93_repeated_actions.clear()
+                self._v94_short_guard_pairs.clear()
             return
         if (action_name not in DIRECTIONS and action_name != 'RESET') or (
             getattr(getattr(before, 'state', None), 'name', '') != 'NOT_FINISHED' or
@@ -449,6 +459,10 @@ class LS20VisualPlanner:
         self._v93_recent_steps.append((before_fp, action_name, after_fp))
         self.level2_v93_observed_steps += 1
         steps = list(self._v93_recent_steps)
+        try:
+            self._v94_check_exact_two_step_oscillation(steps)
+        except Exception:
+            self.level2_v94_observation_errors += 1
         # Compare adjacent equally long *complete* sequences. A one-off
         # self-loop or shared tile can never establish this threshold.
         for period in range(8, min(24, len(steps) // 2) + 1):
@@ -469,6 +483,36 @@ class LS20VisualPlanner:
                     self._v93_repeated_actions.add(key)
                     self.level2_v93_unique_actions_blocked += 1
             break
+
+    def _v94_check_exact_two_step_oscillation(self, steps):
+        """Confirm twice observed A--key1-->B--opposite key2-->A.
+
+        Four consecutive real transitions must agree on both full visible
+        screen fingerprints (excluding the known HUD counter) AND actions.
+        A one-off reverse, individual pixel change or same-screen key repeat
+        does not prove a short cycle. This is not a game-engine rule.
+        """
+        if len(steps) < 4:
+            return
+        first, second, third, fourth = steps[-4:]
+        if first != third or second != fourth:
+            return
+        a, forward, b = first
+        b2, backward, a2 = second
+        if a == b or b != b2 or a != a2:
+            return
+        if forward not in DIRECTIONS or backward not in DIRECTIONS:
+            return
+        dx, dy = DIRECTIONS[forward]
+        if DIRECTIONS[backward] != (-dx, -dy):
+            return
+        self.level2_v94_short_cycles_confirmed += 1
+        # Never block an unobserved next action; require that the first
+        # key was actually taken from the exact displayed state A.
+        pair = (a, forward)
+        if pair not in self._v94_short_guard_pairs and len(self._v94_short_guard_pairs) < 8:
+            self._v94_short_guard_pairs.add(pair)
+            self.level2_v94_unique_pairs_blocked += 1
 
     def _v90_transition_avoid_actions(self, frame_fp, candidates):
         """Reject confirmed bad immediate transitions, not guessed future moves."""
@@ -810,6 +854,7 @@ class LS20VisualPlanner:
         risky_actions = set()
         guarded_blocked = self._blocked
         v93_avoided = set()
+        v94_avoided = set()
         if aligned_level2 and player == LEVEL_2_ROTATION_SWITCH:
             fp = hashlib.sha256(bytes(v for row in grid for v in row)).hexdigest()[:16]
             risky_actions = {
@@ -831,10 +876,14 @@ class LS20VisualPlanner:
             # Never override a visibly aligned goal route or force a move
             # when there is no other visibly passable candidate.
             if turns and player != rotation_tile:
+                short_repeated = {
+                    a for a in candidates
+                    if (_v93_visible_state_fp(grid), a) in self._v94_short_guard_pairs
+                }
                 repeated = {
                     a for a in candidates
                     if (_v93_visible_state_fp(grid), a) in self._v93_repeated_actions
-                }
+                } | short_repeated
                 viable_other = any(
                     a not in repeated and (player, a) not in guarded_blocked
                     and _passable(grid, player[0] + DIRECTIONS[a][0],
@@ -843,9 +892,14 @@ class LS20VisualPlanner:
                 )
                 if repeated and viable_other:
                     v93_avoided = repeated
+                    if short_repeated:
+                        v94_avoided = short_repeated
+                        self.level2_v94_guard_activations += 1
                     guarded_blocked = guarded_blocked | {(player, a) for a in repeated}
                     self.level2_v93_guard_activations += 1
                 elif repeated:
+                    if short_repeated:
+                        self.level2_v94_no_alternative += 1
                     self.level2_v93_no_alternative += 1
             if aligned_level2 and player == LEVEL_2_ROTATION_SWITCH:
                 avoided.update(a for a in candidates if (frame_fp, a) in self._level2_risky_exits)
@@ -884,6 +938,8 @@ class LS20VisualPlanner:
             if alternate is not None:
                 if v93_avoided and alternate not in v93_avoided:
                     self.level2_v93_detours_selected += 1
+                    if v94_avoided:
+                        self.level2_v94_detours_selected += 1
                 return alternate
 
         route = shortest_visible_path(
@@ -931,6 +987,8 @@ class LS20VisualPlanner:
                     self._pending = (player, candidate, level)
                     self.last_reason = 'v93_observed_cycle_visible_detour'
                     self.level2_v93_detours_selected += 1
+                    if v94_avoided:
+                        self.level2_v94_detours_selected += 1
                     self.proposals += 1
                     self.level2_proposals += 1
                     return candidate
@@ -945,6 +1003,8 @@ class LS20VisualPlanner:
         action = route[0]
         if v93_avoided and action not in v93_avoided:
             self.level2_v93_detours_selected += 1
+            if v94_avoided:
+                self.level2_v94_detours_selected += 1
             reason = 'v93_observed_cycle_route_detour'
         if risky_actions and action not in risky_actions:
             self.level2_exit_guard_alternatives += 1
@@ -1139,5 +1199,11 @@ class LS20VisualPlanner:
             "level2_v93_detours_selected": self.level2_v93_detours_selected,
             "level2_v93_no_alternative": self.level2_v93_no_alternative,
             "level2_v93_observation_errors": self.level2_v93_observation_errors,
+            "level2_v94_short_cycles_confirmed": self.level2_v94_short_cycles_confirmed,
+            "level2_v94_unique_pairs_blocked": self.level2_v94_unique_pairs_blocked,
+            "level2_v94_guard_activations": self.level2_v94_guard_activations,
+            "level2_v94_detours_selected": self.level2_v94_detours_selected,
+            "level2_v94_no_alternative": self.level2_v94_no_alternative,
+            "level2_v94_observation_errors": self.level2_v94_observation_errors,
             "last_reason": self.last_reason,
         }

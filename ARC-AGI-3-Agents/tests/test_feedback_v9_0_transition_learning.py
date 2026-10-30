@@ -143,7 +143,7 @@ class V90ObservedTransitionLearningTests(unittest.TestCase):
         from pathlib import Path
         path = Path(__file__).resolve().parents[1] / 'agents' / 'templates' / 'feedback_explorer.py'
         content = path.read_text()
-        self.assertIn('AGENT_VERSION = "9.3"', content)
+        self.assertIn('AGENT_VERSION = "9.4"', content)
         self.assertIn("if level2_visual and getattr(self._ls20_visual_planner, 'v90_request_reset', False):", content)
         self.assertIn('action = GameAction.RESET', content)
 
