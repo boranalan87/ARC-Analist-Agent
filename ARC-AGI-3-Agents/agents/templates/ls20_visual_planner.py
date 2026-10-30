@@ -373,6 +373,9 @@ class LS20VisualPlanner:
         self.level2_v95_recovery_resets = 0
         self.level2_v95_recovery_no_waypoint = 0
         self.level2_v95_recovery_repeat_suppressed = 0
+        # V9.6: READ-ONLY evidence of why the V9.5 recovery found no waypoint.
+        self.level2_v96_route_exclusion_audits = 0
+        self._v96_route_exclusion_events = []  # at most 4 events x 4 visible tiles
 
     def reset_pending(self) -> None:
         """Clear temporary movement information after a reset."""
@@ -531,6 +534,47 @@ class LS20VisualPlanner:
             self._v94_short_guard_pairs.add(pair)
             self.level2_v94_unique_pairs_blocked += 1
 
+    def _v96_audit_route_exclusion(self, grid, player, switch, masked_fp, candidates):
+        """Explain the visible route exclusions WITHOUT influencing navigation.
+
+        Each entry describes one of four visible switch-neighbor tiles. The
+        verdict order is diagnostic only: verified failed > tried > blocked
+        terrain > no current visible route. No hidden game state or engine
+        shortcut is used. This method never changes waypoint or action state.
+        """
+        self.level2_v96_route_exclusion_audits += 1
+        if len(self._v96_route_exclusion_events) >= 4:
+            return
+        results = []
+        for action, (dx, dy) in DIRECTIONS.items():
+            waypoint = (switch[0] + dx, switch[1] + dy)
+            if waypoint == player:
+                reason = 'player_at_waypoint'
+            elif waypoint in self._v92_confirmed_dead_end_approaches:
+                reason = 'observed_failed_entry'
+            elif waypoint in self._v91_waypoints_tried:
+                reason = 'already_tried'
+            elif not _passable(grid, *waypoint):
+                reason = 'not_visibly_passable'
+            else:
+                path = shortest_visible_path(
+                    grid, player, waypoint, candidates, set(),
+                    avoid_positions={switch},
+                )
+                reason = 'visibly_reachable_untried' if path else 'no_visible_route'
+            results.append({
+                'from_switch_action': action,
+                'waypoint': list(waypoint),
+                'reason': reason,
+            })
+        self._v96_route_exclusion_events.append({
+            'frame_fp': masked_fp,
+            'player': list(player),
+            'candidates': sorted(a for a in candidates if a in DIRECTIONS),
+            'outcomes': results,
+            'source': 'validated_visible_level2',
+        })
+
     def _v95_try_recovery_reset(self, grid, player, switch, masked_fp, candidates):
         """Bounded RESET only after repeated, *observed* 2-step loops.
 
@@ -565,6 +609,8 @@ class LS20VisualPlanner:
                 break
         if not waypoint_exists:
             self.level2_v95_recovery_no_waypoint += 1
+            self._v96_audit_route_exclusion(
+                grid, player, switch, masked_fp, candidates)
             return False
         self._v95_recovery_attempted_fps.add(masked_fp)
         self.level2_v95_recovery_resets += 1
@@ -1291,5 +1337,7 @@ class LS20VisualPlanner:
             "level2_v95_recovery_resets": self.level2_v95_recovery_resets,
             "level2_v95_recovery_no_waypoint": self.level2_v95_recovery_no_waypoint,
             "level2_v95_recovery_repeat_suppressed": self.level2_v95_recovery_repeat_suppressed,
+            "level2_v96_route_exclusion_audits": self.level2_v96_route_exclusion_audits,
+            "level2_v96_route_exclusion_events": list(self._v96_route_exclusion_events),
             "last_reason": self.last_reason,
         }
