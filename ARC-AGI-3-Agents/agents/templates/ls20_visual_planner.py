@@ -376,6 +376,11 @@ class LS20VisualPlanner:
         # V9.6: READ-ONLY evidence of why the V9.5 recovery found no waypoint.
         self.level2_v96_route_exclusion_audits = 0
         self._v96_route_exclusion_events = []  # at most 4 events x 4 visible tiles
+        # V9.7 experiment: disabled until explicitly activated.
+        self.enable_v97_bounded_retry = False
+        self._v97_retry_waypoint = None
+        self.level2_v97_retry_reset_requests = 0
+        self.level2_v97_retry_approaches_selected = 0
 
     def reset_pending(self) -> None:
         """Clear temporary movement information after a reset."""
@@ -448,6 +453,7 @@ class LS20VisualPlanner:
                 self._v94_short_guard_pairs.clear()
                 # A new level needs fresh observed cycle evidence.
                 self._v95_confirmed_short_cycles_by_fp.clear()
+                self._v97_retry_waypoint = None
             return
         if (action_name not in DIRECTIONS and action_name != 'RESET') or (
             getattr(getattr(before, 'state', None), 'name', '') != 'NOT_FINISHED' or
@@ -593,20 +599,34 @@ class LS20VisualPlanner:
         # post-reset condition for route availability. The visible switch
         # cannot be crossed on the way to a distinct approach waypoint.
         waypoint_exists = False
+        retry_candidate = None
         for dx, dy in DIRECTIONS.values():
             waypoint = (switch[0] + dx, switch[1] + dy)
             if (waypoint == player or
-                    waypoint in self._v91_waypoints_tried or
                     waypoint in self._v92_confirmed_dead_end_approaches or
                     not _passable(grid, *waypoint)):
+                continue
+            tried = waypoint in self._v91_waypoints_tried
+            if tried and not (
+                self.enable_v97_bounded_retry and
+                self.level2_v97_retry_reset_requests < 1
+            ):
                 continue
             path = shortest_visible_path(
                 grid, player, waypoint, candidates, set(),
                 avoid_positions={switch},
             )
             if path:
-                waypoint_exists = True
-                break
+                if tried:
+                    if retry_candidate is None:
+                        retry_candidate = waypoint
+                else:
+                    waypoint_exists = True
+                    break
+        if not waypoint_exists and retry_candidate is not None:
+            waypoint_exists = True
+            self._v97_retry_waypoint = retry_candidate
+            self.level2_v97_retry_reset_requests += 1
         if not waypoint_exists:
             self.level2_v95_recovery_no_waypoint += 1
             self._v96_audit_route_exclusion(
@@ -701,6 +721,20 @@ class LS20VisualPlanner:
         """
         if self._v91_dead_end_resets == 0 or player == switch:
             return None
+        if (self._v91_approach_waypoint is None and
+                self.enable_v97_bounded_retry and
+                self._v97_retry_waypoint is not None):
+            retry = self._v97_retry_waypoint
+            self._v97_retry_waypoint = None
+            if (retry not in self._v92_confirmed_dead_end_approaches
+                    and _passable(grid, *retry)):
+                path = shortest_visible_path(
+                    grid, player, retry, candidates, blocked,
+                    avoid_positions={switch},
+                )
+                if player == retry or path is not None:
+                    self._v91_approach_waypoint = retry
+                    self.level2_v97_retry_approaches_selected += 1
         if self._v91_approach_waypoint is None:
             for _, (dx, dy) in DIRECTIONS.items():
                 waypoint = (switch[0] + dx, switch[1] + dy)
@@ -1339,5 +1373,7 @@ class LS20VisualPlanner:
             "level2_v95_recovery_repeat_suppressed": self.level2_v95_recovery_repeat_suppressed,
             "level2_v96_route_exclusion_audits": self.level2_v96_route_exclusion_audits,
             "level2_v96_route_exclusion_events": list(self._v96_route_exclusion_events),
+            "level2_v97_retry_reset_requests": self.level2_v97_retry_reset_requests,
+            "level2_v97_retry_approaches_selected": self.level2_v97_retry_approaches_selected,
             "last_reason": self.last_reason,
         }

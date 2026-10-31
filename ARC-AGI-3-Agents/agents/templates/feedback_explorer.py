@@ -12,6 +12,7 @@ FeedbackExplorer V9.5 observed-cycle interruption experiment:
 This agent explores the game but does not guarantee a solution.
 """
 
+import os
 from typing import Any
 
 from arcengine import FrameData, GameAction, GameState
@@ -70,6 +71,17 @@ class FeedbackExplorer(Agent):
             if self._mask_ls20_step_counter and planner_class is not None
             else None
         )
+        # V9.7: Preview-only explicit opt-in for LS20.
+        # Fail closed when either environment condition is absent.
+        if (
+            self._mask_ls20_step_counter
+            and self._ls20_visual_planner is not None
+            and hasattr(self._ls20_visual_planner, "enable_v97_bounded_retry")
+            and os.getenv("VERCEL_ENV") == "preview"
+            and os.getenv("ARC_V97_BOUNDED_RETRY") == "1"
+        ):
+            self._ls20_visual_planner.enable_v97_bounded_retry = True
+
         self.diagnostics = FeedbackDiagnosticsV2(
             policy=self.policy
         )
