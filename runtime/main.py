@@ -33,6 +33,30 @@ ENVIRONMENTS_DIR = os.getenv(
 
 ENVIRONMENTS_PATH = ROOT / ENVIRONMENTS_DIR
 
+V97_RETRY_FLAG = "ARC_V97_BOUNDED_RETRY"
+
+
+def v97_bounded_retry_evidence():
+    """Report the V9.7 opt-in exactly as this process sees it."""
+
+    preview_environment = (
+        os.getenv("VERCEL_ENV", "").strip().lower()
+        == "preview"
+    )
+
+    opt_in = (
+        os.getenv(V97_RETRY_FLAG, "").strip()
+        == "1"
+    )
+
+    return {
+        "preview_environment": preview_environment,
+        "opt_in": opt_in,
+        "enabled": (
+            preview_environment and opt_in
+        ),
+    }
+
 
 if str(AGENT_ROOT) not in sys.path:
     sys.path.insert(0, str(AGENT_ROOT))
@@ -132,6 +156,11 @@ def health():
         "available_agents": available_agents,
         "agent_import_error": agent_import_error,
         "runtime_version": "0.5.1",
+        "feature_flags": {
+            "v97_bounded_retry": (
+                v97_bounded_retry_evidence()
+            ),
+        },
         "deployment_commit": os.getenv("VERCEL_GIT_COMMIT_SHA") or None,
         "feedbackexplorer_class_version": agent_class_version,
     }
@@ -218,6 +247,11 @@ def collect_agent_runtime_probe(swarm, agent_name: str, game_id: str):
             "agent_version": getattr(game_agent, "AGENT_VERSION", None),
             "diagnostics_class": type(tracker).__name__ if tracker is not None else None,
             "planner_attached": planner is not None,
+            "v97_bounded_retry_enabled": (
+                getattr(planner, "enable_v97_bounded_retry", None)
+                if planner is not None
+                else None
+            ),
             "navigation": nav_fn() if callable(nav_fn) else None,
             "visible_goal_planning": planner_fn() if callable(planner_fn) else None,
         }
