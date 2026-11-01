@@ -378,6 +378,10 @@ class LS20VisualPlanner:
         self._v96_route_exclusion_events = []  # at most 4 events x 4 visible tiles
         # V9.7 experiment: disabled until explicitly activated.
         self.enable_v97_bounded_retry = False
+        # V9.8 experimental Preview-only opt-in.
+        self.enable_v98_shortest_retry = False
+        self.level2_v98_retry_candidates_examined = 0
+        self.level2_v98_shortest_retry_selected = 0
         self._v97_retry_waypoint = None
         self.level2_v97_retry_reset_requests = 0
         self.level2_v97_retry_approaches_selected = 0
@@ -600,6 +604,7 @@ class LS20VisualPlanner:
         # cannot be crossed on the way to a distinct approach waypoint.
         waypoint_exists = False
         retry_candidate = None
+        retry_distance = None
         for dx, dy in DIRECTIONS.values():
             waypoint = (switch[0] + dx, switch[1] + dy)
             if (waypoint == player or
@@ -618,7 +623,15 @@ class LS20VisualPlanner:
             )
             if path:
                 if tried:
-                    if retry_candidate is None:
+                    if self.enable_v98_shortest_retry:
+                        # Use current visible routes only. Tie-breaking keeps
+                        # the existing direction order. This is not a WIN.
+                        distance = len(path)
+                        self.level2_v98_retry_candidates_examined += 1
+                        if retry_distance is None or distance < retry_distance:
+                            retry_distance = distance
+                            retry_candidate = waypoint
+                    elif retry_candidate is None:
                         retry_candidate = waypoint
                 else:
                     waypoint_exists = True
@@ -627,6 +640,8 @@ class LS20VisualPlanner:
             waypoint_exists = True
             self._v97_retry_waypoint = retry_candidate
             self.level2_v97_retry_reset_requests += 1
+            if self.enable_v98_shortest_retry:
+                self.level2_v98_shortest_retry_selected += 1
         if not waypoint_exists:
             self.level2_v95_recovery_no_waypoint += 1
             self._v96_audit_route_exclusion(
@@ -1375,5 +1390,7 @@ class LS20VisualPlanner:
             "level2_v96_route_exclusion_events": list(self._v96_route_exclusion_events),
             "level2_v97_retry_reset_requests": self.level2_v97_retry_reset_requests,
             "level2_v97_retry_approaches_selected": self.level2_v97_retry_approaches_selected,
+            "level2_v98_retry_candidates_examined": self.level2_v98_retry_candidates_examined,
+            "level2_v98_shortest_retry_selected": self.level2_v98_shortest_retry_selected,
             "last_reason": self.last_reason,
         }

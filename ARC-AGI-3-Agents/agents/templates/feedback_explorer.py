@@ -81,6 +81,12 @@ class FeedbackExplorer(Agent):
             and os.getenv("ARC_V97_BOUNDED_RETRY") == "1"
         ):
             self._ls20_visual_planner.enable_v97_bounded_retry = True
+            # A separate V9.8 experiment, Preview-only, and explicit opt-in.
+            if (
+                hasattr(self._ls20_visual_planner, "enable_v98_shortest_retry")
+                and os.getenv("ARC_V98_SHORTEST_RETRY") == "1"
+            ):
+                self._ls20_visual_planner.enable_v98_shortest_retry = True
 
         self.diagnostics = FeedbackDiagnosticsV2(
             policy=self.policy

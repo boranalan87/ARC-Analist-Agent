@@ -34,6 +34,7 @@ ENVIRONMENTS_DIR = os.getenv(
 ENVIRONMENTS_PATH = ROOT / ENVIRONMENTS_DIR
 
 V97_RETRY_FLAG = "ARC_V97_BOUNDED_RETRY"
+V98_RETRY_FLAG = "ARC_V98_SHORTEST_RETRY"
 
 
 def v97_bounded_retry_evidence():
@@ -55,6 +56,19 @@ def v97_bounded_retry_evidence():
         "enabled": (
             preview_environment and opt_in
         ),
+    }
+
+
+def v98_shortest_retry_evidence():
+    """Return Preview and explicit opt-in status without leaking secrets."""
+    preview = os.getenv("VERCEL_ENV", "").strip().lower() == "preview"
+    opt_in = os.getenv(V98_RETRY_FLAG, "").strip() == "1"
+    v97 = v97_bounded_retry_evidence()
+    return {
+        "preview_environment": preview,
+        "opt_in": opt_in,
+        "v97_prerequisite": v97["enabled"],
+        "enabled": preview and opt_in and v97["enabled"],
     }
 
 
@@ -160,6 +174,9 @@ def health():
             "v97_bounded_retry": (
                 v97_bounded_retry_evidence()
             ),
+            "v98_shortest_retry": (
+                v98_shortest_retry_evidence()
+            ),
         },
         "deployment_commit": os.getenv("VERCEL_GIT_COMMIT_SHA") or None,
         "feedbackexplorer_class_version": agent_class_version,
@@ -249,6 +266,11 @@ def collect_agent_runtime_probe(swarm, agent_name: str, game_id: str):
             "planner_attached": planner is not None,
             "v97_bounded_retry_enabled": (
                 getattr(planner, "enable_v97_bounded_retry", None)
+                if planner is not None
+                else None
+            ),
+            "v98_shortest_retry_enabled": (
+                getattr(planner, "enable_v98_shortest_retry", None)
                 if planner is not None
                 else None
             ),
