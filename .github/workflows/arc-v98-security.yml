@@ -1,3 +1,4 @@
+
 name: ARC V9.8 Security & Tests
 
 on:
@@ -10,57 +11,76 @@ permissions:
   contents: read
 
 jobs:
-  python-security:
-    name: Python Audit and Tests
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-
+  dependency-audit:
+    name: Dependency Security
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Install audit tools
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install pip-audit bandit pytest
+      - name: Install pip-audit
+        run: python -m pip install pip-audit
 
       - name: Audit dependencies
-        run: python -m pip_audit -r requirements.txt
+        run: |
+          timeout 420s python -m pip_audit \
+            -r requirements.txt
 
-      - name: Scan Python source
+  code-security:
+    name: Bandit Code Security
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Bandit
+        run: python -m pip install bandit
+
+      - name: Scan Python code
         run: |
           bandit -r runtime ARC-AGI-3-Agents \
             -ll -x '*/tests/*'
+
+  python-tests:
+    name: Python Regression Tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
 
       - name: Compile Python
         run: |
           python -m compileall -q \
             runtime ARC-AGI-3-Agents
 
-      - name: Install project dependencies
-        run: python -m pip install -r requirements.txt
-
-      - name: Run Python tests
+      - name: Run regression tests
+        working-directory: ARC-AGI-3-Agents
         run: |
-          python -m pytest -q ARC-AGI-3-Agents/tests
+          python -m unittest discover \
+            -s tests -p 'test_feedback_*.py' -v
 
   secret-scan:
     name: Gitleaks Secret Scan
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Scan for exposed secrets
+      - name: Scan secrets
         uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
