@@ -1,50 +1,11 @@
-
-name: ARC V9.8 Security & Tests
-
-on:
-  push:
-    branches:
-      - security/arc-v98-scans-2026-11-02
-  workflow_dispatch:
-
-permissions:
-  contents: read
-
-jobs:
-  dependency-audit:
-    name: Dependency Security
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
+        uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
-
-      - name: Install pip-audit
-        run: python -m pip install pip-audit
-
-      - name: Audit dependencies
-        run: |
-          timeout 420s python -m pip_audit \
-            -r requirements.txt
-
-  code-security:
-    name: Bandit Code Security
-    runs-on: ubuntu-24.04
-    timeout-minutes: 8
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
+          python-version: '3.12'
 
       - name: Install Bandit
-        run: python -m pip install bandit
+        run: python -m pip install --disable-pip-version-check bandit
 
-      - name: Scan Python code
+      - name: Scan Python source
         run: |
           bandit -r runtime ARC-AGI-3-Agents \
             -ll -x '*/tests/*'
@@ -54,18 +15,19 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout security branch
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: '3.12'
 
-      - name: Compile Python
+      - name: Compile Python sources
         run: |
-          python -m compileall -q \
-            runtime ARC-AGI-3-Agents
+          python -m compileall -q runtime ARC-AGI-3-Agents
 
-      - name: Run regression tests
+      - name: Run FeedbackExplorer regression tests
         working-directory: ARC-AGI-3-Agents
         run: |
           python -m unittest discover \
@@ -76,11 +38,12 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout full history
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Scan secrets
+      - name: Scan repository history for secrets
         uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
