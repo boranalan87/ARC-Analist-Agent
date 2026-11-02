@@ -1,28 +1,50 @@
 name: LS20 Colab replay validation
+
 on:
   push:
-    branches: ["feat/ls20-colab-replay"]
+    branches:
+      - "feat/ls20-colab-replay-from-feat/feedback-explorer-v9-8-shortest-visible-retry"
   workflow_dispatch:
+
 permissions:
   contents: read
+
 jobs:
   validate:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
-      - name: Unit tests (does not need ARC packages)
-        run: python -m unittest discover -s tests -p 'test_ls20_routes.py'
-      - name: Python syntax
-        run: python -m py_compile tools/ls20_replay.py
+          python-version: "3.12"
+
+      - name: Verify required files
+        run: |
+          test -f tools/ls20_replay.py
+          test -f tests/test_ls20_routes.py
+
+      - name: Run LS20 unit tests
+        run: |
+          python -m unittest discover -s tests -p "test_ls20_routes.py" -v
+
+      - name: Check Python syntax
+        run: |
+          python -m py_compile tools/ls20_replay.py
+          python -m py_compile tests/test_ls20_routes.py
+
       - name: Dependency security audit
         run: |
           python -m pip install --upgrade pip-audit
           pip-audit -r requirements.txt
-      - name: Manual acceptance criteria
+
+      - name: Acceptance criteria
+        if: always()
         run: |
-          echo 'No production deployment, score promotion or leaderboard submission performed.'
-          echo 'LS20 local replay must be separately executed in compatible local ARC environment.'
+          echo "Production deployment is not performed."
+          echo "No ARC leaderboard submission is performed."
+          echo "Local LS20 replay requires separate verification."
