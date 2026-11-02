@@ -1,0 +1,66 @@
+name: ARC V9.8 Security & Tests
+
+on:
+  push:
+    branches:
+      - security/arc-v98-scans-2026-11-02
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  python-security:
+    name: Python Audit and Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install audit tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pip-audit bandit pytest
+
+      - name: Audit dependencies
+        run: python -m pip_audit -r requirements.txt
+
+      - name: Scan Python source
+        run: |
+          bandit -r runtime ARC-AGI-3-Agents \
+            -ll -x '*/tests/*'
+
+      - name: Compile Python
+        run: |
+          python -m compileall -q \
+            runtime ARC-AGI-3-Agents
+
+      - name: Install project dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Run Python tests
+        run: |
+          python -m pytest -q ARC-AGI-3-Agents/tests
+
+  secret-scan:
+    name: Gitleaks Secret Scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Scan for exposed secrets
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
